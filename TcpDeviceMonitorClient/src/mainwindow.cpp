@@ -22,6 +22,7 @@
 #include <QSettings>
 #include <QSpinBox>
 #include <QStandardPaths>
+#include <QStatusBar>
 #include <QTableWidget>
 #include <QTextEdit>
 #include <QTextStream>
@@ -36,6 +37,7 @@ MainWindow::MainWindow(QWidget *parent, const QString &dataDirectory)
     : QMainWindow(parent), m_dataDirectory(dataDirectory)
 {
     qRegisterMetaType<Telemetry>();
+    m_clock.start();
     qRegisterMetaType<DeviceCommand>();
     buildUi();
     loadSettings();
@@ -50,18 +52,27 @@ MainWindow::MainWindow(QWidget *parent, const QString &dataDirectory)
 MainWindow::~MainWindow()
 {
     saveSettings();
+    m_offlineTimer->stop();
     if (m_networkThread->isRunning()) {
-        QMetaObject::invokeMethod(m_networkWorker, &TcpClientWorker::shutdown,
-                                  Qt::BlockingQueuedConnection);
-        m_networkThread->quit();
+        QMetaObject::invokeMethod(m_networkWorker, [worker = m_networkWorker] {
+            worker->shutdown();
+            QThread::currentThread()->quit();
+        }, Qt::QueuedConnection);
         m_networkThread->wait(); // Never destroy a still-running QThread.
     }
+    // The network producer has stopped. Deliver its bounded remaining samples
+    // before queueing database shutdown, so accepted telemetry is drained.
+    QCoreApplication::sendPostedEvents(this, QEvent::MetaCall);
     if (m_databaseThread->isRunning()) {
-        QMetaObject::invokeMethod(m_databaseWorker, &DatabaseWorker::shutdown,
-                                  Qt::BlockingQueuedConnection);
-        m_databaseThread->quit();
+        QMetaObject::invokeMethod(m_databaseWorker, [worker = m_databaseWorker] {
+            worker->shutdown();
+            QThread::currentThread()->quit();
+        }, Qt::QueuedConnection);
         m_databaseThread->wait();
     }
+    QCoreApplication::sendPostedEvents(this, QEvent::MetaCall);
+    appendLog(QStringLiteral("存储统计：成功 %1，失败 %2，过载丢弃 %3，最慢写入 %4ms")
+        .arg(m_savedSamples).arg(m_failedSamples).arg(m_droppedSamples).arg(m_maxWriteMs));
 }
 
 void MainWindow::connectConfiguredServer()
@@ -188,6 +199,23 @@ void MainWindow::setupWorkers()
 
     connect(this, &MainWindow::initializeDatabase, m_databaseWorker, &DatabaseWorker::initialize);
     connect(this, &MainWindow::storeTelemetry, m_databaseWorker, &DatabaseWorker::storeTelemetry);
+    connect(m_databaseWorker, &DatabaseWorker::sampleProcessed,
+            m_networkWorker, &TcpClientWorker::telemetryProcessed);
+    connect(m_databaseWorker, &DatabaseWorker::sampleProcessed, this,
+            [this](bool saved, qint64 elapsedMs) {
+                saved ? ++m_savedSamples : ++m_failedSamples;
+                m_maxWriteMs = qMax(m_maxWriteMs, elapsedMs);
+            });
+    connect(m_networkWorker, &TcpClientWorker::pipelineStats, this,
+            [this](int pending, int peak, quint64 dropped) {
+                if (dropped != m_droppedSamples) {
+                    appendLog(QStringLiteral("存储链路过载：累计丢弃 %1 条遥测，历史及报警可能缺失").arg(dropped), true);
+                    m_droppedSamples = dropped;
+                }
+                statusBar()->showMessage(QStringLiteral("待存储 %1/64 · 峰值 %2 · 已保存 %3 · 写入失败 %4 · 过载丢弃 %5 · 最慢写入 %6ms")
+                    .arg(pending).arg(peak).arg(m_savedSamples).arg(m_failedSamples)
+                    .arg(dropped).arg(m_maxWriteMs));
+            });
     connect(m_databaseWorker, &DatabaseWorker::databaseError, this,
             [this](const QString &error) { appendLog(QStringLiteral("数据库错误：%1").arg(error), true); });
     connect(m_databaseWorker, &DatabaseWorker::alarmRaised, this,
@@ -204,7 +232,7 @@ void MainWindow::handleTelemetry(const Telemetry &t)
     if (t.deviceId < 1 || t.deviceId > 4)
         return;
     const int row = t.deviceId - 1;
-    m_lastSeen[t.deviceId] = QDateTime::currentMSecsSinceEpoch();
+    m_lastSeen[t.deviceId] = m_clock.elapsed();
     const QStringList values = {QStringLiteral("在线"), stateText(t.state),
         QString::number(t.temperature, 'f', 1), QString::number(t.pressure, 'f', 2),
         QString::number(t.rpm), QString::number(t.faultCode), t.timestamp.toString("HH:mm:ss.zzz")};
@@ -242,11 +270,13 @@ void MainWindow::sendSelectedCommand(DeviceCommand command)
 
 void MainWindow::checkOfflineDevices()
 {
-    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const qint64 now = m_clock.elapsed();
     for (quint16 id = 1; id <= 4; ++id) {
         if (!m_lastSeen.contains(id) || now - m_lastSeen.value(id) > 3000) {
             m_devices->item(id - 1, 1)->setText(QStringLiteral("离线"));
             m_devices->item(id - 1, 1)->setForeground(QColor(198, 40, 40));
+            for (int column = 2; column < 8; ++column)
+                m_devices->item(id - 1, column)->setText("--");
         } else {
             m_devices->item(id - 1, 1)->setForeground(QColor(46, 125, 50));
         }

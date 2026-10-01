@@ -20,7 +20,7 @@ qt_add_executable(NetworkIntegrationTests
 target_include_directories(NetworkIntegrationTests PRIVATE
     TcpDeviceMonitorClient/src DeviceSimulator/simulator)
 target_link_libraries(NetworkIntegrationTests PRIVATE MonitorProtocol Qt6::Network Qt6::Test)
-add_test(NAME NetworkIntegrationTests COMMAND NetworkIntegrationTests)
+add_test(NAME NetworkIntegrationTests COMMAND NetworkIntegrationTests -o network-results.txt,txt)
 
 qt_add_executable(ReliabilityTests tests/test_reliability.cpp
     TcpDeviceMonitorClient/src/tcpclientworker.h
@@ -29,5 +29,5 @@ qt_add_executable(ReliabilityTests tests/test_reliability.cpp
     DeviceSimulator/simulator/simulatorserver.cpp)
 target_include_directories(ReliabilityTests PRIVATE TcpDeviceMonitorClient/src DeviceSimulator/simulator)
 target_link_libraries(ReliabilityTests PRIVATE MonitorProtocol Qt6::Network Qt6::Test)
-add_test(NAME ReliabilityTests COMMAND ReliabilityTests)
+add_test(NAME ReliabilityTests COMMAND ReliabilityTests -o reliability-results.txt,txt)
 set_tests_properties(ReliabilityTests PROPERTIES TIMEOUT 90)

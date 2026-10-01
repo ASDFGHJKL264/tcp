@@ -115,7 +115,7 @@ QList<Packet> StreamParser::append(const QByteArray &bytes)
             m_lastError = QStringLiteral("已丢弃%1个无效字节").arg(magicIndex);
             m_buffer.remove(0, magicIndex);
         }
-        if (m_buffer.size() < HeaderSize + 2)
+        if (m_buffer.size() < HeaderSize)
             break;
         QDataStream header(m_buffer.left(HeaderSize));
         header.setByteOrder(QDataStream::BigEndian);
@@ -126,7 +126,10 @@ QList<Packet> StreamParser::append(const QByteArray &bytes)
         quint16 deviceId;
         quint32 payloadLength;
         header >> magic >> version >> type >> sequence >> deviceId >> payloadLength;
-        if (version != Version || payloadLength > MaximumPayloadSize || type < 1 || type > 5) {
+        // Version 1 has fixed-size payloads. Reject impossible lengths before
+        // waiting for a body, otherwise a corrupt header can block valid frames.
+        const quint32 expectedLength = type == 3 ? 31 : (type == 4 || type == 5 ? 1 : 0);
+        if (version != Version || type < 1 || type > 5 || payloadLength != expectedLength) {
             m_lastError = QStringLiteral("协议版本或负载长度无效");
             m_buffer.remove(0, 2);
             continue;

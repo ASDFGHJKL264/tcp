@@ -6,24 +6,31 @@
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QThread>
+#include <QElapsedTimer>
+#include <QScopeGuard>
+#include <QUuid>
 
-DatabaseWorker::DatabaseWorker(QObject *parent) : QObject(parent) {}
+DatabaseWorker::DatabaseWorker(QObject *parent) : QObject(parent) { m_clock.start(); }
 
 void DatabaseWorker::initialize(const QString &databasePath)
 {
+    Q_ASSERT(QThread::currentThread() == thread());
+    shutdown();
     m_databasePath = databasePath;
     QDir().mkpath(QFileInfo(databasePath).absolutePath());
-    m_connectionName = QStringLiteral("monitor-db-%1")
-        .arg(reinterpret_cast<quintptr>(QThread::currentThreadId()));
+    m_connectionName = QStringLiteral("monitor-db-%1").arg(QUuid::createUuid().toString());
     QSqlDatabase db = QSqlDatabase::addDatabase("QSQLITE", m_connectionName);
     db.setDatabaseName(databasePath);
+    db.setConnectOptions("QSQLITE_BUSY_TIMEOUT=250");
     if (!db.open()) {
         emit databaseError(db.lastError().text());
         return;
     }
     QSqlQuery query(db);
-    query.exec("PRAGMA journal_mode=WAL");
-    query.exec("PRAGMA synchronous=NORMAL");
+    if (!query.exec("PRAGMA journal_mode=WAL") || !query.exec("PRAGMA synchronous=NORMAL")) {
+        emit databaseError(query.lastError().text());
+        return;
+    }
     const QString createTelemetry =
         "CREATE TABLE IF NOT EXISTS telemetry("
         "id INTEGER PRIMARY KEY AUTOINCREMENT, sample_time TEXT NOT NULL,"
@@ -37,17 +44,32 @@ void DatabaseWorker::initialize(const QString &databasePath)
         emit databaseError(query.lastError().text());
         return;
     }
-    query.exec("CREATE INDEX IF NOT EXISTS idx_telemetry_time ON telemetry(sample_time)");
-    query.exec("CREATE INDEX IF NOT EXISTS idx_alarm_time ON alarms(alarm_time)");
+    if (!query.exec("CREATE INDEX IF NOT EXISTS idx_telemetry_time ON telemetry(sample_time)")
+        || !query.exec("CREATE INDEX IF NOT EXISTS idx_alarm_time ON alarms(alarm_time)")) {
+        emit databaseError(query.lastError().text());
+        return;
+    }
     m_ready = true;
     emit ready(m_connectionName);
 }
 
 void DatabaseWorker::storeTelemetry(const MonitorProtocol::Telemetry &t)
 {
-    if (!m_ready)
+    Q_ASSERT(QThread::currentThread() == thread());
+    QElapsedTimer timer;
+    timer.start();
+    bool saved = false;
+    const auto completion = qScopeGuard([&] { emit sampleProcessed(saved, timer.elapsed()); });
+    if (!m_ready) {
+        emit databaseError(QStringLiteral("数据库尚未就绪，样本未保存"));
         return;
+    }
     QSqlDatabase db = QSqlDatabase::database(m_connectionName);
+    if (!db.transaction()) {
+        emit databaseError(db.lastError().text());
+        return;
+    }
+    const auto rollback = qScopeGuard([&] { if (!saved) db.rollback(); });
     QSqlQuery query(db);
     query.prepare("INSERT INTO telemetry(sample_time,device_id,temperature,pressure,rpm,state,fault_code) "
                   "VALUES(?,?,?,?,?,?,?)");
@@ -74,20 +96,28 @@ void DatabaseWorker::storeTelemetry(const MonitorProtocol::Telemetry &t)
         alarmType = QStringLiteral("设备故障");
         message = QStringLiteral("设备%1故障码：%2").arg(t.deviceId).arg(t.faultCode);
     }
-    if (alarmType.isEmpty())
-        return;
     const QString alarmKey = QStringLiteral("%1:%2").arg(t.deviceId).arg(alarmType);
-    const qint64 alarmTime = t.timestamp.toMSecsSinceEpoch();
-    if (alarmTime - m_lastAlarmMs.value(alarmKey, 0) < 60000)
+    // Rate limiting uses local monotonic time, never a device's adjustable clock.
+    const qint64 alarmTime = m_clock.elapsed();
+    const bool raiseAlarm = !alarmType.isEmpty() && (!m_lastAlarmMs.contains(alarmKey)
+        || alarmTime - m_lastAlarmMs.value(alarmKey) >= 60000);
+    if (raiseAlarm) {
+        query.prepare("INSERT INTO alarms(alarm_time,device_id,alarm_type,message) VALUES(?,?,?,?)");
+        query.addBindValue(t.timestamp.toString(Qt::ISODateWithMs));
+        query.addBindValue(t.deviceId);
+        query.addBindValue(alarmType);
+        query.addBindValue(message);
+        if (!query.exec()) {
+            emit databaseError(query.lastError().text());
+            return;
+        }
+    }
+    if (!db.commit()) {
+        emit databaseError(db.lastError().text());
         return;
-    query.prepare("INSERT INTO alarms(alarm_time,device_id,alarm_type,message) VALUES(?,?,?,?)");
-    query.addBindValue(t.timestamp.toString(Qt::ISODateWithMs));
-    query.addBindValue(t.deviceId);
-    query.addBindValue(alarmType);
-    query.addBindValue(message);
-    if (!query.exec())
-        emit databaseError(query.lastError().text());
-    else {
+    }
+    saved = true;
+    if (raiseAlarm) {
         m_lastAlarmMs.insert(alarmKey, alarmTime);
         emit alarmRaised(message);
     }
@@ -95,6 +125,7 @@ void DatabaseWorker::storeTelemetry(const MonitorProtocol::Telemetry &t)
 
 void DatabaseWorker::shutdown()
 {
+    Q_ASSERT(QThread::currentThread() == thread());
     if (!m_connectionName.isEmpty()) {
         {
             QSqlDatabase db = QSqlDatabase::database(m_connectionName, false);
@@ -104,4 +135,6 @@ void DatabaseWorker::shutdown()
         QSqlDatabase::removeDatabase(m_connectionName);
     }
     m_ready = false;
+    m_connectionName.clear();
+    m_lastAlarmMs.clear();
 }

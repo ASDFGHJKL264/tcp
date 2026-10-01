@@ -57,6 +57,31 @@ class ReliabilityTest : public QObject {
     Q_OBJECT
 private slots:
     void initTestCase() { qRegisterMetaType<Telemetry>(); }
+    void boundedTelemetryAndResume() {
+        Peer peer; QVERIFY(peer.listen(QHostAddress::LocalHost, 0));
+        ClientThread client;
+        QSignalSpy samples(client.worker, &TcpClientWorker::telemetryReceived);
+        QSignalSpy stats(client.worker, &TcpClientWorker::pipelineStats);
+        client.connectTo(peer.serverPort()); QTRY_VERIFY(peer.socket);
+        Telemetry t; t.timestamp = QDateTime::currentDateTime();
+        for (int i = 0; i < 1000; ++i)
+            peer.send({MessageType::Telemetry, quint32(i + 1), 1, encodeTelemetry(t)});
+        QTRY_COMPARE(samples.size(), TcpClientWorker::MaximumInFlightTelemetry);
+        QTRY_VERIFY(!stats.isEmpty() && stats.last()[2].toULongLong() == 936);
+        QCOMPARE(stats.last()[0].toInt(), 64);
+        QCOMPARE(stats.last()[1].toInt(), 64);
+        // Control confirmation must still progress while telemetry delivery is full.
+        QSignalSpy finished(client.worker, &TcpClientWorker::commandFinished);
+        client.command(); QTRY_COMPARE(peer.commands.size(), 1);
+        peer.send({MessageType::CommandAck, peer.commands.first().sequence, 1, QByteArray(1, 1)});
+        peer.send({MessageType::Telemetry, 1001, 1, encodeTelemetry(t)});
+        QTRY_COMPARE(finished.size(), 1);
+        QVERIFY(finished.first()[2].toBool());
+        QMetaObject::invokeMethod(client.worker, &TcpClientWorker::telemetryProcessed,
+                                  Qt::BlockingQueuedConnection);
+        peer.send({MessageType::Telemetry, 1002, 1, encodeTelemetry(t)});
+        QTRY_COMPARE(samples.size(), 65);
+    }
     void ackMatchingAndState() {
         Peer peer; QVERIFY(peer.listen(QHostAddress::LocalHost, 0));
         ClientThread client;

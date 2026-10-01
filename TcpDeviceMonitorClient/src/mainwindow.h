@@ -5,6 +5,7 @@
 
 #include <QHash>
 #include <QMainWindow>
+#include <QElapsedTimer>
 
 class DatabaseWorker;
 class QComboBox;
@@ -62,6 +63,11 @@ private:
     DatabaseWorker *m_databaseWorker;
     QTimer *m_offlineTimer;
     QHash<quint16, qint64> m_lastSeen;
+    QElapsedTimer m_clock;
+    quint64 m_savedSamples = 0;
+    quint64 m_failedSamples = 0;
+    quint64 m_droppedSamples = 0;
+    qint64 m_maxWriteMs = 0;
     bool m_connected = false;
     bool m_sessionActive = false;
     QString m_dataDirectory;

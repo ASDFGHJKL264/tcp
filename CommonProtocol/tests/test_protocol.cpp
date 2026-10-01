@@ -15,6 +15,28 @@ private slots:
     void stickyPackets();
     void corruptedPacketRecovery();
     void telemetryRoundTrip();
+    void invalidLengthRecovery() {
+        for (int type = 1; type <= 5; ++type) {
+            QByteArray bad = encodePacket({static_cast<MessageType>(type), 1, 0, {}}).left(HeaderSize);
+            bad[10] = 0; bad[11] = 0x10; bad[12] = 0; bad[13] = 0; // 1 MiB
+            const auto good = encodePacket({MessageType::HeartbeatAck, 2, 0, {}});
+            StreamParser parser;
+            QVERIFY(parser.append(bad).isEmpty());
+            QVERIFY(!parser.takeLastError().isEmpty());
+            const auto recovered = parser.append(good);
+            QCOMPARE(recovered.size(), 1);
+            QCOMPARE(recovered.first().sequence, quint32(2));
+        }
+    }
+    void everyTelemetrySplit() {
+        Telemetry t; t.timestamp = QDateTime::currentDateTime();
+        const auto frame = encodePacket({MessageType::Telemetry, 10, 1, encodeTelemetry(t)});
+        for (qsizetype split = 1; split < frame.size(); ++split) {
+            StreamParser parser;
+            QVERIFY(parser.append(frame.left(split)).isEmpty());
+            QCOMPARE(parser.append(frame.mid(split)).size(), 1);
+        }
+    }
 };
 
 void ProtocolTest::crcKnownVector()

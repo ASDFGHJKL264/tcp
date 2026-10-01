@@ -2,6 +2,7 @@
 
 #include <QDateTime>
 #include <QTcpSocket>
+#include <QThread>
 #include <utility>
 
 using namespace MonitorProtocol;
@@ -171,7 +172,16 @@ void TcpClientWorker::handlePacket(const Packet &packet)
         emit logMessage(error, true);
         return;
     }
-    emit telemetryReceived(telemetry);
+    // Keep consuming control/heartbeat traffic when storage is slow. Drop new
+    // telemetry explicitly rather than queueing unbounded cross-thread events.
+    // Credits survive reconnects because old storage completions can arrive late.
+    if (m_inFlightTelemetry < MaximumInFlightTelemetry) {
+        ++m_inFlightTelemetry;
+        m_peakTelemetry = qMax(m_peakTelemetry, m_inFlightTelemetry);
+        emit telemetryReceived(telemetry);
+    } else {
+        ++m_droppedTelemetry;
+    }
     for (auto it = m_pending.begin(); it != m_pending.end(); ++it) {
         if (it->deviceId != telemetry.deviceId || !it->accepted
             || m_clock.elapsed() >= it->deadline) continue;
@@ -230,6 +240,10 @@ bool TcpClientWorker::writePacket(const Packet &packet)
 void TcpClientWorker::checkDeadlines()
 {
     const auto now = m_clock.elapsed();
+    if (now - m_lastStats >= 1000) {
+        m_lastStats = now;
+        emit pipelineStats(m_inFlightTelemetry, m_peakTelemetry, m_droppedTelemetry);
+    }
     if (m_socket->state() != QAbstractSocket::ConnectedState
         && m_socket->state() != QAbstractSocket::UnconnectedState && now - m_connectStarted >= 5000) {
         m_socket->abort();
@@ -256,6 +270,14 @@ void TcpClientWorker::failPending(const QString &reason)
 void TcpClientWorker::shutdown()
 {
     disconnectFromServer();
+    emit pipelineStats(m_inFlightTelemetry, m_peakTelemetry, m_droppedTelemetry);
     if (m_socket)
         m_socket->abort();
+}
+
+void TcpClientWorker::telemetryProcessed()
+{
+    Q_ASSERT(QThread::currentThread() == thread());
+    if (m_inFlightTelemetry > 0)
+        --m_inFlightTelemetry;
 }

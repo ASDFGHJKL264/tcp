@@ -1,0 +1,10 @@
+{
+  "name": "TCP工业设备监控系统",
+  "version": "2026.09.30",
+  "installDirectory": "D:\\TCP工业设备监控系统",
+  "applications": [
+    {"source": "TcpDeviceMonitorClient", "target": "TcpDeviceMonitor", "executable": "TcpDeviceMonitor.exe", "shortcut": "TCP工业设备监控系统"},
+    {"source": "DeviceSimulator", "target": "DeviceSimulator", "executable": "DeviceSimulator.exe", "shortcut": "TCP设备模拟器"}
+  ],
+  "documents": ["README.md", "RELIABILITY.md", "VALIDATION.md", "RELEASE.md"]
+}

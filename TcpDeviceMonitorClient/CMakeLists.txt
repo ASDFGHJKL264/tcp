@@ -30,7 +30,7 @@ if(BUILD_TESTING)
     )
     target_include_directories(DatabaseIntegrationTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(DatabaseIntegrationTests PRIVATE MonitorProtocol Qt6::Sql Qt6::Test)
-    add_test(NAME DatabaseIntegrationTests COMMAND DatabaseIntegrationTests)
+    add_test(NAME DatabaseIntegrationTests COMMAND DatabaseIntegrationTests -o database-results.txt,txt)
     qt_add_executable(WindowLifecycleTests tests/test_windowlifecycle.cpp
         src/mainwindow.h src/mainwindow.cpp
         src/tcpclientworker.h src/tcpclientworker.cpp
@@ -39,8 +39,8 @@ if(BUILD_TESTING)
         src/historydialog.h src/historydialog.cpp)
     target_include_directories(WindowLifecycleTests PRIVATE src)
     target_link_libraries(WindowLifecycleTests PRIVATE MonitorProtocol Qt6::Widgets Qt6::Network Qt6::Sql Qt6::Test)
-    add_test(NAME WindowLifecycleTests COMMAND WindowLifecycleTests -platform offscreen)
-    set_tests_properties(WindowLifecycleTests PROPERTIES TIMEOUT 30)
+    add_test(NAME WindowLifecycleTests COMMAND WindowLifecycleTests -platform offscreen -o lifecycle-results.txt,txt)
+    set_tests_properties(WindowLifecycleTests PROPERTIES TIMEOUT 180)
 endif()
 
 install(TARGETS TcpDeviceMonitor RUNTIME DESTINATION .)

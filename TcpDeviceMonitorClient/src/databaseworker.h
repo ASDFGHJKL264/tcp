@@ -6,6 +6,7 @@
 #include <QObject>
 #include <QHash>
 #include <QString>
+#include <QElapsedTimer>
 
 class DatabaseWorker final : public QObject
 {
@@ -22,12 +23,14 @@ signals:
     void ready(const QString &connectionName);
     void databaseError(const QString &message);
     void alarmRaised(const QString &message);
+    void sampleProcessed(bool saved, qint64 elapsedMs);
 
 private:
     QString m_connectionName;
     QString m_databasePath;
     bool m_ready = false;
     QHash<QString, qint64> m_lastAlarmMs;
+    QElapsedTimer m_clock;
 };
 
 #endif

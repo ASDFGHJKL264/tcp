@@ -1,0 +1,32 @@
+{
+  "date": "2026-09-30",
+  "version": "2026.09.30",
+  "checks": [
+    {
+      "Product": "TCP工业设备监控系统",
+      "Executable": "TcpDeviceMonitor.exe",
+      "CleanInstall": true,
+      "Update": true,
+      "ConfigPreserved": true,
+      "DataPreserved": true,
+      "Backup": true,
+      "StartupWithoutQtPath": true,
+      "CleanExit": true
+    },
+    {
+      "Product": "TCP工业设备监控系统",
+      "Executable": "DeviceSimulator.exe",
+      "CleanInstall": true,
+      "Update": true,
+      "ConfigPreserved": true,
+      "DataPreserved": true,
+      "Backup": true,
+      "StartupWithoutQtPath": true,
+      "CleanExit": true
+    }
+  ],
+  "automatedTestTargetsPassed": 5,
+  "lifecycleCycles": 100,
+  "existingFilesPreservedOnUpgrade": 0,
+  "hardwareAcceptancePerformed": false
+}

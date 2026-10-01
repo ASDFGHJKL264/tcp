@@ -23,3 +23,9 @@ TcpMonitorSystem/
 - `CommonProtocol`：CRC、协议编解码、半包、粘包和损坏包恢复测试。
 - `TcpDeviceMonitorClient`：SQLite遥测和报警写入测试。
 - 根目录：真实服务端与客户端工作对象之间的TCP集成测试。
+
+## 整改验证
+
+Windows / Qt MinGW环境可运行 `./scripts/verify.ps1 -LifecycleCycles 100`，独立构建两端应用并执行协议、网络、数据库和窗口生命周期测试。Qt与工具路径可以通过脚本参数指定。
+
+运行时状态栏显示待存储数量、峰值、成功/失败样本数、过载丢弃数和最慢写入耗时。验证范围及限制见 [VALIDATION.md](VALIDATION.md)。

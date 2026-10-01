@@ -15,6 +15,7 @@ class TcpClientWorker final : public QObject
     Q_OBJECT
 public:
     explicit TcpClientWorker(QObject *parent = nullptr);
+    static constexpr int MaximumInFlightTelemetry = 64;
 
 public slots:
     void initialize();
@@ -22,6 +23,8 @@ public slots:
     void disconnectFromServer();
     void sendCommand(quint16 deviceId, MonitorProtocol::DeviceCommand command);
     void shutdown();
+    // One completion per delivered sample, including failed storage attempts.
+    void telemetryProcessed();
 
 signals:
     void telemetryReceived(const MonitorProtocol::Telemetry &telemetry);
@@ -30,6 +33,7 @@ signals:
     void commandAcknowledged(quint16 deviceId, bool success);
     void sessionActiveChanged(bool active);
     void commandFinished(quint16 deviceId, quint32 sequence, bool success, const QString &reason);
+    void pipelineStats(int pending, int peak, quint64 dropped);
 
 private:
     void ensureSocket();
@@ -56,6 +60,10 @@ private:
     QElapsedTimer m_clock;
     qint64 m_connectStarted = 0;
     quint32 m_heartbeatSequence = 0;
+    int m_inFlightTelemetry = 0;
+    int m_peakTelemetry = 0;
+    quint64 m_droppedTelemetry = 0;
+    qint64 m_lastStats = 0;
     struct Pending {
         quint16 deviceId;
         MonitorProtocol::DeviceCommand command;
