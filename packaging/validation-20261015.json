@@ -1,0 +1,29 @@
+{
+  "date": "2026-10-15",
+  "version": "2026.10.15",
+  "command": "scripts/verify.ps1 -LifecycleCycles 100",
+  "targets": 7,
+  "result": "passed",
+  "qtTestPassedEntries": [
+    3,
+    15,
+    5,
+    4,
+    8,
+    8,
+    10
+  ],
+  "entryCountIncludesInitCleanupAndDataRows": true,
+  "lifecycle": {
+    "cycles": 100,
+    "maximumCloseMs": 27,
+    "qtTestDurationMs": 27009
+  },
+  "additionalRun": "two integration targets rerun after disconnect/session-reset assertions; passed",
+  "limitations": [
+    "simulator and temporary data only",
+    "no 24-hour aging or P95 benchmark",
+    "previous unexplained lifecycle timeout remains historical",
+    "normal I/O close timing is not a hard deadline"
+  ]
+}

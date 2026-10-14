@@ -5,6 +5,7 @@
 #include <QStandardPaths>
 #include <QSettings>
 #include <QTextEdit>
+#include <QTableWidget>
 #include <QSqlDatabase>
 #include <QSqlQuery>
 #include <QtTest>
@@ -12,6 +13,52 @@
 class WindowLifecycleTest : public QObject {
     Q_OBJECT
 private slots:
+    void storageOverloadDoesNotMarkLiveDeviceOffline() {
+        QStandardPaths::setTestModeEnabled(true);
+        QTemporaryDir directory; QVERIFY(directory.isValid());
+        QCoreApplication::setOrganizationName("TcpReliabilityTests");
+        QCoreApplication::setApplicationName(QFileInfo(directory.path()).fileName());
+        QSettings::setDefaultFormat(QSettings::IniFormat);
+        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, directory.path());
+        QTcpServer server; QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        QSettings settings;
+        settings.setValue("network/host", "127.0.0.1");
+        settings.setValue("network/port", server.serverPort());
+        MainWindow window(nullptr, directory.path());
+        // Simulate a downstream consumer withholding completion credits. This
+        // avoids locking real databases or relying on machine-specific IO timing.
+        QVERIFY(QObject::disconnect(&window, SIGNAL(storedTelemetryProcessed()), nullptr, nullptr));
+        window.connectConfiguredServer();
+        QTRY_VERIFY(server.hasPendingConnections());
+        auto *socket = server.nextPendingConnection();
+        MonitorProtocol::StreamParser parser;
+        connect(socket, &QTcpSocket::readyRead, socket, [&] {
+            for (const auto &packet : parser.append(socket->readAll())) {
+                if (packet.type == MonitorProtocol::MessageType::Heartbeat)
+                    socket->write(MonitorProtocol::encodePacket({MonitorProtocol::MessageType::HeartbeatAck,
+                        packet.sequence, 0, {}}));
+            }
+        });
+        MonitorProtocol::Telemetry telemetry;
+        telemetry.timestamp = QDateTime::currentDateTime();
+        const auto send = [&] {
+            socket->write(MonitorProtocol::encodePacket({MonitorProtocol::MessageType::Telemetry,
+                1, 1, MonitorProtocol::encodeTelemetry(telemetry)}));
+        };
+        for (int i = 0; i < 100; ++i) send();
+        QTimer stream;
+        connect(&stream, &QTimer::timeout, &window, send);
+        stream.start(100);
+        QTest::qWait(3800);
+        auto *table = window.findChild<QTableWidget *>(); QVERIFY(table);
+        QCOMPARE(table->item(0, 1)->text(), QStringLiteral("在线（存储过载）"));
+        QVERIFY(table->item(0, 1)->toolTip().contains("最近已交付样本"));
+        stream.stop();
+        QTest::qWait(4400); // Includes the 1-second GUI offline timer granularity.
+        QCOMPARE(table->item(0, 1)->text(), QStringLiteral("离线"));
+        QCOMPARE(table->item(0, 3)->text(), QStringLiteral("--"));
+        socket->deleteLater();
+    }
     void openConnectAndClose() {
         QStandardPaths::setTestModeEnabled(true);
         QTemporaryDir directory;

@@ -3,11 +3,16 @@
 #include <QDateTime>
 #include <QTcpSocket>
 #include <QThread>
+#include <algorithm>
 #include <utility>
 
 using namespace MonitorProtocol;
 
-TcpClientWorker::TcpClientWorker(QObject *parent) : QObject(parent) { m_clock.start(); }
+TcpClientWorker::TcpClientWorker(QObject *parent) : QObject(parent)
+{
+    m_clock.start();
+    qRegisterMetaType<NetworkUiUpdate>();
+}
 
 void TcpClientWorker::initialize()
 {
@@ -20,6 +25,10 @@ void TcpClientWorker::ensureSocket()
         return;
     m_socket = new QTcpSocket(this);
     m_socket->setReadBufferSize(128 * 1024);
+    m_uiTimer = new QTimer(this);
+    m_uiTimer->setInterval(250);
+    connect(m_uiTimer, &QTimer::timeout, this, &TcpClientWorker::publishUiUpdate);
+    m_uiTimer->start();
     m_deadlineTimer = new QTimer(this);
     m_deadlineTimer->setInterval(100);
     connect(m_deadlineTimer, &QTimer::timeout, this, &TcpClientWorker::checkDeadlines);
@@ -34,12 +43,13 @@ void TcpClientWorker::ensureSocket()
         m_lastHeartbeatAck = m_clock.elapsed();
         m_heartbeatTimer->start();
         emit connectionStateChanged(true, QStringLiteral("已连接"));
-        emit logMessage(QStringLiteral("TCP连接建立：%1:%2").arg(m_host).arg(m_port));
+        queueLog(QStringLiteral("TCP连接建立：%1:%2").arg(m_host).arg(m_port));
     });
     connect(m_socket, &QTcpSocket::disconnected, this, [this] {
         m_heartbeatTimer->stop();
         m_parser.clear();
         m_heartbeatSequence = 0;
+        clearDeviceActivity();
         failPending(QStringLiteral("连接断开，执行结果未知；不会自动重发"));
         emit connectionStateChanged(false, m_manualDisconnect
             ? QStringLiteral("已断开") : QStringLiteral("连接中断，等待重连"));
@@ -48,7 +58,7 @@ void TcpClientWorker::ensureSocket()
     });
     connect(m_socket, &QTcpSocket::readyRead, this, &TcpClientWorker::readAvailableData);
     connect(m_socket, &QTcpSocket::errorOccurred, this, [this](QAbstractSocket::SocketError) {
-        emit logMessage(QStringLiteral("网络错误：%1").arg(m_socket->errorString()), true);
+        queueLog(QStringLiteral("网络错误：%1").arg(m_socket->errorString()), true);
         if (!m_manualDisconnect && m_socket->state() == QAbstractSocket::UnconnectedState)
             scheduleReconnect();
     });
@@ -63,7 +73,7 @@ void TcpClientWorker::connectToServer(const QString &host, quint16 port)
     m_host = host.trimmed();
     m_port = port;
     if (m_host.isEmpty() || port == 0) {
-        emit logMessage(QStringLiteral("服务器地址或端口无效"), true);
+        queueLog(QStringLiteral("服务器地址或端口无效"), true);
         return;
     }
     m_manualDisconnect = false;
@@ -95,6 +105,7 @@ void TcpClientWorker::disconnectFromServer()
         m_socket->abort();
     m_parser.clear();
     m_heartbeatSequence = 0;
+    clearDeviceActivity();
     failPending(QStringLiteral("连接已取消，执行结果未知"));
     emit sessionActiveChanged(false);
     emit connectionStateChanged(false, QStringLiteral("已断开"));
@@ -103,14 +114,14 @@ void TcpClientWorker::disconnectFromServer()
 void TcpClientWorker::sendCommand(quint16 deviceId, DeviceCommand command)
 {
     if (!m_socket || m_socket->state() != QAbstractSocket::ConnectedState) {
-        emit logMessage(QStringLiteral("命令发送失败：TCP未连接"), true);
+        queueLog(QStringLiteral("命令发送失败：TCP未连接"), true);
         return;
     }
     if (deviceId < 1 || deviceId > 4 || static_cast<int>(command) < 1 || static_cast<int>(command) > 3)
         return;
     for (const auto &pending : std::as_const(m_pending)) {
         if (pending.deviceId == deviceId) {
-            emit logMessage(QStringLiteral("设备%1仍有待确认命令").arg(deviceId), true);
+            queueLog(QStringLiteral("设备%1仍有待确认命令").arg(deviceId), true);
             return;
         }
     }
@@ -120,7 +131,7 @@ void TcpClientWorker::sendCommand(quint16 deviceId, DeviceCommand command)
         return;
     }
     m_pending.insert(m_sequence, {deviceId, command, m_clock.elapsed() + 3000, false});
-    emit logMessage(QStringLiteral("设备%1命令#%2已发送，等待ACK").arg(deviceId).arg(m_sequence));
+    queueLog(QStringLiteral("设备%1命令#%2已发送，等待ACK").arg(deviceId).arg(m_sequence));
 }
 
 void TcpClientWorker::readAvailableData()
@@ -128,7 +139,7 @@ void TcpClientWorker::readAvailableData()
     const auto packets = m_parser.append(m_socket->read(64 * 1024));
     const QString parserError = m_parser.takeLastError();
     if (!parserError.isEmpty())
-        emit logMessage(QStringLiteral("协议解析告警：%1").arg(parserError), true);
+        queueLog(QStringLiteral("协议解析告警：%1").arg(parserError), true);
     for (const Packet &packet : packets)
         handlePacket(packet);
     if (m_socket->bytesAvailable() > 0)
@@ -158,7 +169,7 @@ void TcpClientWorker::handlePacket(const Packet &packet)
         } else {
             it->accepted = true;
             it->deadline = m_clock.elapsed() + 5000;
-            emit logMessage(QStringLiteral("设备%1接受命令#%2，等待遥测状态确认")
+            queueLog(QStringLiteral("设备%1接受命令#%2，等待遥测状态确认")
                 .arg(packet.deviceId).arg(packet.sequence));
         }
         return;
@@ -169,9 +180,14 @@ void TcpClientWorker::handlePacket(const Packet &packet)
     telemetry.deviceId = packet.deviceId;
     QString error;
     if (!decodeTelemetry(packet.payload, &telemetry, &error)) {
-        emit logMessage(error, true);
+        queueLog(error, true);
         return;
     }
+    // Activity is refreshed even when downstream delivery has exhausted its
+    // credits. Receipt time uses the same monotonic reference as the GUI timer.
+    m_lastTelemetry[telemetry.deviceId - 1] = m_clock.msecsSinceReference() + m_clock.elapsed();
+    m_storageLimited[telemetry.deviceId - 1] = m_inFlightTelemetry >= MaximumInFlightTelemetry;
+    m_uiDirty = true;
     // Keep consuming control/heartbeat traffic when storage is slow. Drop new
     // telemetry explicitly rather than queueing unbounded cross-thread events.
     // Credits survive reconnects because old storage completions can arrive late.
@@ -202,7 +218,7 @@ void TcpClientWorker::sendHeartbeat()
 {
     const qint64 now = m_clock.elapsed();
     if (now - m_lastHeartbeatAck > 6500) {
-        emit logMessage(QStringLiteral("心跳连续超时，主动断开并重连"), true);
+        queueLog(QStringLiteral("心跳连续超时，主动断开并重连"), true);
         m_socket->abort();
         return;
     }
@@ -219,7 +235,7 @@ void TcpClientWorker::scheduleReconnect()
         return;
     m_reconnectAttempt = qMin(m_reconnectAttempt + 1, 32);
     const int delay = qMin(30000, 1000 * (1 << qMin(m_reconnectAttempt - 1, 5)));
-    emit logMessage(QStringLiteral("%1秒后进行第%2次重连")
+    queueLog(QStringLiteral("%1秒后进行第%2次重连")
                         .arg(delay / 1000).arg(m_reconnectAttempt), true);
     m_reconnectTimer->start(delay);
     emit connectionStateChanged(false, QStringLiteral("等待重连（%1秒），可取消").arg(delay / 1000));
@@ -230,7 +246,7 @@ bool TcpClientWorker::writePacket(const Packet &packet)
     if (!m_socket || m_socket->state() != QAbstractSocket::ConnectedState) return false;
     const auto frame = encodePacket(packet);
     if (m_socket->bytesToWrite() + frame.size() > 64 * 1024) {
-        emit logMessage(QStringLiteral("发送积压超过64KiB，断开连接"), true);
+        queueLog(QStringLiteral("发送积压超过64KiB，断开连接"), true);
         m_socket->abort();
         return false;
     }
@@ -240,10 +256,6 @@ bool TcpClientWorker::writePacket(const Packet &packet)
 void TcpClientWorker::checkDeadlines()
 {
     const auto now = m_clock.elapsed();
-    if (now - m_lastStats >= 1000) {
-        m_lastStats = now;
-        emit pipelineStats(m_inFlightTelemetry, m_peakTelemetry, m_droppedTelemetry);
-    }
     if (m_socket->state() != QAbstractSocket::ConnectedState
         && m_socket->state() != QAbstractSocket::UnconnectedState && now - m_connectStarted >= 5000) {
         m_socket->abort();
@@ -269,8 +281,10 @@ void TcpClientWorker::failPending(const QString &reason)
 
 void TcpClientWorker::shutdown()
 {
+    m_uiStopping = true;
+    if (m_uiTimer)
+        m_uiTimer->stop();
     disconnectFromServer();
-    emit pipelineStats(m_inFlightTelemetry, m_peakTelemetry, m_droppedTelemetry);
     if (m_socket)
         m_socket->abort();
 }
@@ -280,4 +294,95 @@ void TcpClientWorker::telemetryProcessed()
     Q_ASSERT(QThread::currentThread() == thread());
     if (m_inFlightTelemetry > 0)
         --m_inFlightTelemetry;
+    m_uiDirty = true;
+}
+
+int TcpClientWorker::pendingUiLogCount() const
+{
+    Q_ASSERT(QThread::currentThread() == thread());
+    return m_uiLogs.size() + m_inFlightUiLogs;
+}
+
+void TcpClientWorker::queueLog(const QString &message, bool warning)
+{
+    const int pending = pendingUiLogCount();
+    if (!warning && pending >= MaximumPendingUiLogs - ReservedWarningUiLogs) {
+        ++m_droppedNormalUiLogs;
+    } else if (pending >= MaximumPendingUiLogs) {
+        // Never retract an already emitted batch. Warnings can only evict an
+        // ordinary entry still waiting in this thread; all-warning saturation
+        // drops the new warning and reports the cumulative count.
+        const auto ordinary = std::find_if(m_uiLogs.begin(), m_uiLogs.end(),
+            [](const NetworkLogEntry &entry) { return !entry.warning; });
+        if (ordinary == m_uiLogs.end()) {
+            ++m_droppedWarningUiLogs;
+        } else {
+            m_uiLogs.erase(ordinary);
+            ++m_droppedNormalUiLogs;
+            m_uiLogs.append({message.left(MaximumUiLogCharacters), true});
+        }
+    } else {
+        m_uiLogs.append({message.left(MaximumUiLogCharacters), warning});
+    }
+    m_uiDirty = true;
+}
+
+NetworkUiUpdate TcpClientWorker::makeUiUpdate() const
+{
+    NetworkUiUpdate update;
+    update.lastTelemetry = m_lastTelemetry;
+    update.storageLimited = m_storageLimited;
+    update.pendingTelemetry = m_inFlightTelemetry;
+    update.peakTelemetry = m_peakTelemetry;
+    update.droppedTelemetry = m_droppedTelemetry;
+    update.droppedNormalLogs = m_droppedNormalUiLogs;
+    update.droppedWarningLogs = m_droppedWarningUiLogs;
+    return update;
+}
+
+void TcpClientWorker::publishUiUpdate()
+{
+    Q_ASSERT(QThread::currentThread() == thread());
+    if (m_uiStopping || m_uiUpdateInFlight || !m_uiDirty)
+        return;
+    auto update = makeUiUpdate();
+    while (!m_uiLogs.isEmpty() && update.logs.size() < UiLogBatchSize) {
+        const auto warning = std::find_if(m_uiLogs.begin(), m_uiLogs.end(),
+            [](const NetworkLogEntry &entry) { return entry.warning; });
+        const auto next = warning == m_uiLogs.end() ? m_uiLogs.begin() : warning;
+        update.logs.append(*next);
+        m_uiLogs.erase(next);
+    }
+    m_inFlightUiLogs = update.logs.size();
+    m_uiUpdateInFlight = true;
+    m_uiDirty = false;
+    emit uiUpdateReady(update);
+}
+
+void TcpClientWorker::uiUpdateProcessed()
+{
+    Q_ASSERT(QThread::currentThread() == thread());
+    if (!m_uiUpdateInFlight)
+        return;
+    m_uiUpdateInFlight = false;
+    m_inFlightUiLogs = 0;
+    m_uiDirty = m_uiDirty || !m_uiLogs.isEmpty();
+    // The timer batches the next delivery. No synchronous callback and no
+    // per-dropped-message event can accumulate while the GUI is suspended.
+}
+
+void TcpClientWorker::clearDeviceActivity()
+{
+    m_lastTelemetry.fill(-1);
+    m_storageLimited.fill(false);
+    m_uiDirty = true;
+}
+
+NetworkUiUpdate TcpClientWorker::takeFinalUiUpdate()
+{
+    Q_ASSERT(QThread::currentThread() == thread());
+    Q_ASSERT(m_uiStopping);
+    auto update = makeUiUpdate();
+    update.logs = std::exchange(m_uiLogs, {});
+    return update;
 }

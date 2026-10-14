@@ -20,6 +20,7 @@ class QThread;
 class QTimer;
 class RealTimePlot;
 class TcpClientWorker;
+struct NetworkUiUpdate;
 
 class MainWindow final : public QMainWindow
 {
@@ -35,6 +36,8 @@ signals:
     void requestCommand(quint16 deviceId, MonitorProtocol::DeviceCommand command);
     void storeTelemetry(const MonitorProtocol::Telemetry &telemetry);
     void initializeDatabase(const QString &path);
+    void networkUiUpdateProcessed();
+    void storedTelemetryProcessed();
 
 private:
     void buildUi();
@@ -42,6 +45,7 @@ private:
     void loadSettings();
     void saveSettings();
     void handleTelemetry(const MonitorProtocol::Telemetry &telemetry);
+    void handleNetworkUiUpdate(const NetworkUiUpdate &update);
     void updateConnectionState(bool connected, const QString &description);
     void appendLog(const QString &message, bool warning = false);
     void sendSelectedCommand(MonitorProtocol::DeviceCommand command);
@@ -65,10 +69,13 @@ private:
     DatabaseWorker *m_databaseWorker;
     QTimer *m_offlineTimer;
     QHash<quint16, qint64> m_lastSeen;
+    QHash<quint16, bool> m_storageLimited;
     QElapsedTimer m_clock;
     quint64 m_savedSamples = 0;
     quint64 m_failedSamples = 0;
     quint64 m_droppedSamples = 0;
+    quint64 m_droppedNetworkNormalLogs = 0;
+    quint64 m_droppedNetworkWarningLogs = 0;
     qint64 m_maxWriteMs = 0;
     bool m_connected = false;
     bool m_sessionActive = false;

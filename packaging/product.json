@@ -1,10 +1,25 @@
 {
   "name": "TCP工业设备监控系统",
-  "version": "2026.10.14",
+  "version": "2026.10.15",
   "installDirectory": "D:\\TCP工业设备监控系统",
   "applications": [
-    {"source": "TcpDeviceMonitorClient", "target": "TcpDeviceMonitor", "executable": "TcpDeviceMonitor.exe", "shortcut": "TCP工业设备监控系统"},
-    {"source": "DeviceSimulator", "target": "DeviceSimulator", "executable": "DeviceSimulator.exe", "shortcut": "TCP设备模拟器"}
+    {
+      "source": "TcpDeviceMonitorClient",
+      "target": "TcpDeviceMonitor",
+      "executable": "TcpDeviceMonitor.exe",
+      "shortcut": "TCP工业设备监控系统"
+    },
+    {
+      "source": "DeviceSimulator",
+      "target": "DeviceSimulator",
+      "executable": "DeviceSimulator.exe",
+      "shortcut": "TCP设备模拟器"
+    }
   ],
-  "documents": ["README.md", "RELIABILITY.md", "VALIDATION.md", "RELEASE.md"]
+  "documents": [
+    "README.md",
+    "RELIABILITY.md",
+    "VALIDATION.md",
+    "RELEASE.md"
+  ]
 }

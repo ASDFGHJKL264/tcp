@@ -120,15 +120,20 @@ private slots:
         Peer peer; QVERIFY(peer.listen(QHostAddress::LocalHost, 0));
         ClientThread client;
         QSignalSpy samples(client.worker, &TcpClientWorker::telemetryReceived);
-        QSignalSpy stats(client.worker, &TcpClientWorker::pipelineStats);
+        QSignalSpy stats(client.worker, &TcpClientWorker::uiUpdateReady);
+        QObject deliveryReceiver; // Cancels queued lambdas before ClientThread is destroyed.
+        connect(client.worker, &TcpClientWorker::uiUpdateReady, &deliveryReceiver, [&client] {
+            QMetaObject::invokeMethod(client.worker, &TcpClientWorker::uiUpdateProcessed);
+        });
         client.connectTo(peer.serverPort()); QTRY_VERIFY(peer.socket);
         Telemetry t; t.timestamp = QDateTime::currentDateTime();
         for (int i = 0; i < 1000; ++i)
             peer.send({MessageType::Telemetry, quint32(i + 1), 1, encodeTelemetry(t)});
         QTRY_COMPARE(samples.size(), TcpClientWorker::MaximumInFlightTelemetry);
-        QTRY_VERIFY(!stats.isEmpty() && stats.last()[2].toULongLong() == 936);
-        QCOMPARE(stats.last()[0].toInt(), 64);
-        QCOMPARE(stats.last()[1].toInt(), 64);
+        QTRY_VERIFY(!stats.isEmpty()
+            && qvariant_cast<NetworkUiUpdate>(stats.last()[0]).droppedTelemetry == 936);
+        QCOMPARE(qvariant_cast<NetworkUiUpdate>(stats.last()[0]).pendingTelemetry, 64);
+        QCOMPARE(qvariant_cast<NetworkUiUpdate>(stats.last()[0]).peakTelemetry, 64);
         // Control confirmation must still progress while telemetry delivery is full.
         QSignalSpy finished(client.worker, &TcpClientWorker::commandFinished);
         client.command(); QTRY_COMPARE(peer.commands.size(), 1);
@@ -142,6 +147,7 @@ private slots:
         QTRY_COMPARE(samples.size(), 65);
     }
     void ackMatchingAndState() {
+        // The ordinary command path remains independent of the UI mailbox.
         Peer peer; QVERIFY(peer.listen(QHostAddress::LocalHost, 0));
         ClientThread client;
         QSignalSpy finished(client.worker, &TcpClientWorker::commandFinished);
@@ -269,6 +275,97 @@ private slots:
         Telemetry t; t.timestamp = QDateTime::currentDateTime();
         t.temperature = std::numeric_limits<double>::quiet_NaN();
         Telemetry output; QVERIFY(!decodeTelemetry(encodeTelemetry(t), &output));
+    }
+    void liveActivityIsIndependentOfStorageAndExpires() {
+        Peer peer; QVERIFY(peer.listen(QHostAddress::LocalHost, 0));
+        ClientThread client;
+        QSignalSpy samples(client.worker, &TcpClientWorker::telemetryReceived);
+        NetworkUiUpdate latest;
+        QObject deliveryReceiver;
+        connect(client.worker, &TcpClientWorker::uiUpdateReady, &deliveryReceiver,
+            [&](const NetworkUiUpdate &update) {
+                latest = update;
+                QMetaObject::invokeMethod(client.worker, &TcpClientWorker::uiUpdateProcessed);
+            });
+        client.connectTo(peer.serverPort()); QTRY_VERIFY(peer.socket);
+        Telemetry t; t.deviceId = 1; t.timestamp = QDateTime::currentDateTime();
+        for (int i = 0; i < 100; ++i)
+            peer.send({MessageType::Telemetry, quint32(i + 1), 1, encodeTelemetry(t)});
+        QTimer stream;
+        connect(&stream, &QTimer::timeout, this, [&] {
+            peer.send({MessageType::Telemetry, 101, 1, encodeTelemetry(t)});
+        });
+        stream.start(100);
+        QTest::qWait(3800); // Longer than the GUI's device-offline threshold.
+        QCOMPARE(samples.size(), TcpClientWorker::MaximumInFlightTelemetry);
+        QCOMPARE(latest.pendingTelemetry, 64);
+        QVERIFY(latest.droppedTelemetry > 36);
+        QVERIFY(latest.storageLimited[0]);
+        QElapsedTimer clock; clock.start();
+        const auto now = [&] { return clock.msecsSinceReference() + clock.elapsed(); };
+        QVERIFY(latest.lastTelemetry[0] >= 0);
+        QVERIFY(now() - latest.lastTelemetry[0] < 1000);
+        stream.stop();
+        QTest::qWait(3400);
+        QVERIFY(now() - latest.lastTelemetry[0] > 3000);
+        QCOMPARE(peer.socket->state(), QAbstractSocket::ConnectedState); // Heartbeat still works.
+        QMetaObject::invokeMethod(client.worker, &TcpClientWorker::disconnectFromServer,
+                                  Qt::BlockingQueuedConnection);
+        QTRY_VERIFY(latest.lastTelemetry[0] < 0);
+        for (int i = 0; i < 4; ++i) {
+            QCOMPARE(latest.lastTelemetry[i], qint64(-1));
+            QVERIFY(!latest.storageLimited[i]);
+        }
+        client.connectTo(peer.serverPort());
+        QTRY_COMPARE(peer.socket->state(), QAbstractSocket::ConnectedState);
+        QTest::qWait(300);
+        // A new TCP connection alone is not proof that an old device is live.
+        QCOMPARE(latest.lastTelemetry[0], qint64(-1));
+    }
+    void blockedGuiHasOneUpdateAndBoundedWarningLogs() {
+        Peer peer; QVERIFY(peer.listen(QHostAddress::LocalHost, 0));
+        ClientThread client;
+        // Deliberately do not acknowledge the first batch: this models a GUI
+        // event loop that has stopped consuming queued deliveries.
+        QSignalSpy updates(client.worker, &TcpClientWorker::uiUpdateReady);
+        QSignalSpy samples(client.worker, &TcpClientWorker::telemetryReceived);
+        client.connectTo(peer.serverPort()); QTRY_VERIFY(peer.socket);
+        QTRY_COMPARE(updates.size(), 1);
+        Telemetry invalid; invalid.timestamp = QDateTime::currentDateTime();
+        invalid.temperature = std::numeric_limits<double>::quiet_NaN();
+        QByteArray burst;
+        for (int i = 0; i < 10000; ++i)
+            burst += encodePacket({MessageType::Telemetry, quint32(i + 1), 1, encodeTelemetry(invalid)});
+        QCOMPARE(peer.socket->write(burst), qint64(burst.size()));
+        while (peer.socket->bytesToWrite() > 0)
+            QVERIFY(peer.socket->waitForBytesWritten(2000));
+        QTest::qSleep(600); // Intentionally no GUI event processing here.
+        int pending = 0;
+        quint64 droppedWarnings = 0;
+        QMetaObject::invokeMethod(client.worker, [w = client.worker, &pending, &droppedWarnings] {
+            pending = w->pendingUiLogCount();
+            droppedWarnings = w->droppedWarningUiLogs();
+        }, Qt::BlockingQueuedConnection);
+        QVERIFY(pending <= TcpClientWorker::MaximumPendingUiLogs);
+        QVERIFY(droppedWarnings > 1000);
+        QCOMPARE(updates.size(), 1); // Not one MetaCall per frame or timer tick.
+        QCOMPARE(samples.size(), 0);
+        // Recovery emits one finite batch, exposes loss, and accepts valid data.
+        QMetaObject::invokeMethod(client.worker, &TcpClientWorker::uiUpdateProcessed);
+        QTRY_COMPARE(updates.size(), 2);
+        const auto resumed = qvariant_cast<NetworkUiUpdate>(updates.last()[0]);
+        QVERIFY(resumed.logs.size() <= TcpClientWorker::UiLogBatchSize);
+        QVERIFY(resumed.droppedWarningLogs >= droppedWarnings);
+        QVERIFY(!resumed.logs.isEmpty());
+        for (const auto &entry : resumed.logs) {
+            QVERIFY(entry.warning);
+            QVERIFY(entry.message.size() <= TcpClientWorker::MaximumUiLogCharacters);
+        }
+        Telemetry valid; valid.timestamp = QDateTime::currentDateTime();
+        peer.send({MessageType::Telemetry, 20001, 1, encodeTelemetry(valid)});
+        QTRY_COMPARE(samples.size(), 1);
+        client.stop(); // A missing GUI acknowledgement must not deadlock shutdown.
+        QVERIFY(client.worker.isNull());
     }
     void heartbeatTimeout() {
         Peer peer; peer.heartbeat = false; QVERIFY(peer.listen(QHostAddress::LocalHost, 0));

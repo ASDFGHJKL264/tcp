@@ -59,9 +59,11 @@ MainWindow::~MainWindow()
 {
     saveSettings();
     m_offlineTimer->stop();
+    NetworkUiUpdate remainingUi;
     if (m_networkThread->isRunning()) {
-        QMetaObject::invokeMethod(m_networkWorker, [worker = m_networkWorker] {
+        QMetaObject::invokeMethod(m_networkWorker, [worker = m_networkWorker, &remainingUi] {
             worker->shutdown();
+            remainingUi = worker->takeFinalUiUpdate();
             QThread::currentThread()->quit();
         }, Qt::QueuedConnection);
         m_networkThread->wait(); // Never destroy a still-running QThread.
@@ -69,6 +71,9 @@ MainWindow::~MainWindow()
     // The network producer has stopped. Deliver its bounded remaining samples
     // before queueing database shutdown, so accepted telemetry is drained.
     QCoreApplication::sendPostedEvents(this, QEvent::MetaCall);
+    // At most 128 finite waiting logs remain. The producer never waits for GUI
+    // acknowledgements during shutdown; its older queued batch is drained first.
+    handleNetworkUiUpdate(remainingUi);
     if (m_databaseThread->isRunning()) {
         QMetaObject::invokeMethod(m_databaseWorker, [worker = m_databaseWorker] {
             worker->shutdown();
@@ -194,7 +199,12 @@ void MainWindow::setupWorkers()
     connect(m_networkWorker, &TcpClientWorker::telemetryReceived, this, &MainWindow::handleTelemetry);
     connect(m_networkWorker, &TcpClientWorker::connectionStateChanged,
             this, &MainWindow::updateConnectionState);
-    connect(m_networkWorker, &TcpClientWorker::logMessage, this, &MainWindow::appendLog);
+    connect(m_networkWorker, &TcpClientWorker::uiUpdateReady,
+            this, &MainWindow::handleNetworkUiUpdate);
+    connect(this, &MainWindow::networkUiUpdateProcessed,
+            m_networkWorker, &TcpClientWorker::uiUpdateProcessed);
+    connect(this, &MainWindow::storedTelemetryProcessed,
+            m_networkWorker, &TcpClientWorker::telemetryProcessed);
     connect(m_networkWorker, &TcpClientWorker::sessionActiveChanged, this, [this](bool active) {
         m_sessionActive = active;
         m_host->setEnabled(!active);
@@ -208,22 +218,14 @@ void MainWindow::setupWorkers()
 
     connect(this, &MainWindow::initializeDatabase, m_databaseWorker, &DatabaseWorker::initialize);
     connect(this, &MainWindow::storeTelemetry, m_databaseWorker, &DatabaseWorker::storeTelemetry);
-    connect(m_databaseWorker, &DatabaseWorker::sampleProcessed,
-            m_networkWorker, &TcpClientWorker::telemetryProcessed);
     connect(m_databaseWorker, &DatabaseWorker::sampleProcessed, this,
             [this](bool saved, qint64 elapsedMs) {
                 saved ? ++m_savedSamples : ++m_failedSamples;
                 m_maxWriteMs = qMax(m_maxWriteMs, elapsedMs);
-            });
-    connect(m_networkWorker, &TcpClientWorker::pipelineStats, this,
-            [this](int pending, int peak, quint64 dropped) {
-                if (dropped != m_droppedSamples) {
-                    appendLog(QStringLiteral("存储链路过载：累计丢弃 %1 条遥测，历史及报警可能缺失").arg(dropped), true);
-                    m_droppedSamples = dropped;
-                }
-                statusBar()->showMessage(QStringLiteral("待存储 %1/64 · 峰值 %2 · 已保存 %3 · 写入失败 %4 · 过载丢弃 %5 · 最慢写入 %6ms")
-                    .arg(pending).arg(peak).arg(m_savedSamples).arg(m_failedSamples)
-                    .arg(dropped).arg(m_maxWriteMs));
+                // Return the credit only after GUI consumes the completion.
+                // Otherwise a fast failing database can continuously replenish
+                // credits while its error/completion GUI MetaCalls accumulate.
+                emit storedTelemetryProcessed();
             });
     connect(m_databaseWorker, &DatabaseWorker::databaseError, this,
             [this](const QString &error) { appendLog(QStringLiteral("数据库错误：%1").arg(error), true); });
@@ -241,16 +243,50 @@ void MainWindow::handleTelemetry(const Telemetry &t)
     if (t.deviceId < 1 || t.deviceId > 4)
         return;
     const int row = t.deviceId - 1;
-    m_lastSeen[t.deviceId] = m_clock.elapsed();
-    const QStringList values = {QStringLiteral("在线"), stateText(t.state),
+    const QStringList values = {stateText(t.state),
         QString::number(t.temperature, 'f', 1), QString::number(t.pressure, 'f', 2),
         QString::number(t.rpm), QString::number(t.faultCode), t.timestamp.toString("HH:mm:ss.zzz")};
     for (int i = 0; i < values.size(); ++i)
-        m_devices->item(row, i + 1)->setText(values.at(i));
+        m_devices->item(row, i + 2)->setText(values.at(i));
     const QColor color = t.state == DeviceState::Fault ? QColor(198, 40, 40) : QColor(46, 125, 50);
     m_devices->item(row, 2)->setForeground(color);
     m_plot->appendPoint(t.deviceId, t.temperature, t.pressure);
     emit storeTelemetry(t);
+}
+
+void MainWindow::handleNetworkUiUpdate(const NetworkUiUpdate &update)
+{
+    if (m_connected) {
+        for (quint16 id = 1; id <= 4; ++id) {
+            const qint64 receiptTime = update.lastTelemetry[id - 1];
+            if (receiptTime >= 0)
+                m_lastSeen[id] = receiptTime;
+            else
+                m_lastSeen.remove(id);
+            m_storageLimited[id] = update.storageLimited[id - 1];
+        }
+    }
+    for (const auto &entry : update.logs)
+        appendLog(entry.message, entry.warning);
+    if (update.droppedNormalLogs != m_droppedNetworkNormalLogs
+        || update.droppedWarningLogs != m_droppedNetworkWarningLogs) {
+        m_droppedNetworkNormalLogs = update.droppedNormalLogs;
+        m_droppedNetworkWarningLogs = update.droppedWarningLogs;
+        appendLog(QStringLiteral("网络日志入口过载：普通日志累计丢弃 %1，警告日志累计丢弃 %2；继续接收通信，日志可能不完整")
+            .arg(m_droppedNetworkNormalLogs).arg(m_droppedNetworkWarningLogs), true);
+    }
+    if (update.droppedTelemetry != m_droppedSamples) {
+        m_droppedSamples = update.droppedTelemetry;
+        appendLog(QStringLiteral("存储链路过载：累计丢弃 %1 条遥测，历史及报警可能缺失；设备在线状态仍按合法遥测接收判断")
+            .arg(m_droppedSamples), true);
+    }
+    statusBar()->showMessage(QStringLiteral("待存储 %1/64 · 峰值 %2 · 已保存 %3 · 写入失败 %4 · 过载丢弃 %5 · 最慢写入 %6ms")
+        .arg(update.pendingTelemetry).arg(update.peakTelemetry).arg(m_savedSamples)
+        .arg(m_failedSamples).arg(update.droppedTelemetry).arg(m_maxWriteMs));
+    checkOfflineDevices();
+    // A signal connection is automatically removed when the worker is deleted;
+    // the finite shutdown drain never dereferences its former raw pointer.
+    emit networkUiUpdateProcessed();
 }
 
 void MainWindow::updateConnectionState(bool connected, const QString &description)
@@ -260,6 +296,7 @@ void MainWindow::updateConnectionState(bool connected, const QString &descriptio
     if (!connected) {
         m_plot->clear();
         m_lastSeen.clear();
+        m_storageLimited.clear();
         checkOfflineDevices();
     }
     m_connectionState->setText(description);
@@ -279,15 +316,23 @@ void MainWindow::sendSelectedCommand(DeviceCommand command)
 
 void MainWindow::checkOfflineDevices()
 {
-    const qint64 now = m_clock.elapsed();
+    const qint64 now = m_clock.msecsSinceReference() + m_clock.elapsed();
     for (quint16 id = 1; id <= 4; ++id) {
-        if (!m_lastSeen.contains(id) || now - m_lastSeen.value(id) > 3000) {
+        if (!m_connected || !m_lastSeen.contains(id) || now - m_lastSeen.value(id) > 3000) {
             m_devices->item(id - 1, 1)->setText(QStringLiteral("离线"));
+            m_devices->item(id - 1, 1)->setToolTip(QStringLiteral("超过3秒未收到合法遥测，或TCP连接已断开"));
             m_devices->item(id - 1, 1)->setForeground(QColor(198, 40, 40));
             for (int column = 2; column < 8; ++column)
                 m_devices->item(id - 1, column)->setText("--");
         } else {
-            m_devices->item(id - 1, 1)->setForeground(QColor(46, 125, 50));
+            const bool limited = m_storageLimited.value(id);
+            m_devices->item(id - 1, 1)->setText(limited
+                ? QStringLiteral("在线（存储过载）") : QStringLiteral("在线"));
+            m_devices->item(id - 1, 1)->setForeground(limited
+                ? QColor(230, 120, 0) : QColor(46, 125, 50));
+            m_devices->item(id - 1, 1)->setToolTip(limited
+                ? QStringLiteral("通信仍在线；当前数值是最近已交付样本，存储过载时实时及历史数据可能缺失")
+                : QStringLiteral("最近3秒内收到合法遥测；通信状态不依赖数据库写入额度"));
         }
     }
 }
