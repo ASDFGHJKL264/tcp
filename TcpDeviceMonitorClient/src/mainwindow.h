@@ -7,6 +7,7 @@
 #include <QMainWindow>
 #include <QElapsedTimer>
 
+class AsyncFileLogger;
 class DatabaseWorker;
 class QComboBox;
 class QLabel;
@@ -57,6 +58,7 @@ private:
     QComboBox *m_plotDevice;
     RealTimePlot *m_plot;
     QTextEdit *m_log;
+    AsyncFileLogger *m_fileLogger = nullptr;
     QThread *m_networkThread;
     QThread *m_databaseThread;
     TcpClientWorker *m_networkWorker;

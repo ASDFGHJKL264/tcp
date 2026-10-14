@@ -18,6 +18,8 @@ qt_add_executable(TcpDeviceMonitor WIN32
     src/databaseworker.h src/databaseworker.cpp
     src/realtimeplot.h src/realtimeplot.cpp
     src/historydialog.h src/historydialog.cpp
+    src/historyqueryworker.h src/historyqueryworker.cpp
+    src/asyncfilelogger.h src/asyncfilelogger.cpp
 )
 target_link_libraries(TcpDeviceMonitor PRIVATE
     MonitorProtocol Qt6::Widgets Qt6::Network Qt6::Sql)
@@ -36,11 +38,27 @@ if(BUILD_TESTING)
         src/tcpclientworker.h src/tcpclientworker.cpp
         src/databaseworker.h src/databaseworker.cpp
         src/realtimeplot.h src/realtimeplot.cpp
-        src/historydialog.h src/historydialog.cpp)
+        src/historydialog.h src/historydialog.cpp
+        src/historyqueryworker.h src/historyqueryworker.cpp
+        src/asyncfilelogger.h src/asyncfilelogger.cpp)
     target_include_directories(WindowLifecycleTests PRIVATE src)
     target_link_libraries(WindowLifecycleTests PRIVATE MonitorProtocol Qt6::Widgets Qt6::Network Qt6::Sql Qt6::Test)
     add_test(NAME WindowLifecycleTests COMMAND WindowLifecycleTests -platform offscreen -o lifecycle-results.txt,txt)
     set_tests_properties(WindowLifecycleTests PROPERTIES TIMEOUT 180)
+    qt_add_executable(HistoryQueryTests tests/test_history.cpp
+        src/historydialog.h src/historydialog.cpp
+        src/historyqueryworker.h src/historyqueryworker.cpp)
+    target_include_directories(HistoryQueryTests PRIVATE src)
+    target_link_libraries(HistoryQueryTests PRIVATE Qt6::Widgets Qt6::Sql Qt6::Test)
+    add_test(NAME HistoryQueryTests COMMAND HistoryQueryTests -platform offscreen -o history-results.txt,txt)
+    set_tests_properties(HistoryQueryTests PROPERTIES TIMEOUT 45)
+    qt_add_executable(PresentationTests tests/test_presentation.cpp
+        src/asyncfilelogger.h src/asyncfilelogger.cpp
+        src/realtimeplot.h src/realtimeplot.cpp)
+    target_include_directories(PresentationTests PRIVATE src)
+    target_link_libraries(PresentationTests PRIVATE Qt6::Widgets Qt6::Test)
+    add_test(NAME PresentationTests COMMAND PresentationTests -platform offscreen -o presentation-results.txt,txt)
+    set_tests_properties(PresentationTests PROPERTIES TIMEOUT 30)
 endif()
 
 install(TARGETS TcpDeviceMonitor RUNTIME DESTINATION .)

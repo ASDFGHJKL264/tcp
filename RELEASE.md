@@ -1,6 +1,6 @@
 # Windows 发布与安装
 
-发布版本：2026.09.30。安装包包含监控客户端和设备模拟器，使用 Release 构建，并部署 Qt、MinGW 运行库及 SQLite 插件。
+发布版本：2026.10.14。安装包包含监控客户端和设备模拟器，使用 Release 构建，并部署 Qt、MinGW 运行库及 SQLite 插件。
 
 双击安装包，默认安装至 `D:\TCP工业设备监控系统`，创建两个桌面快捷方式。先打开 TCP 设备模拟器，再打开监控客户端连接 `127.0.0.1:45454`。便携 ZIP 解压后也可直接运行两个 exe。
 
@@ -9,3 +9,5 @@
 复现打包：先运行 `scripts/verify.ps1 -LifecycleCycles 100`，再执行 `python scripts/package.py`。工具路径可通过 `--qt-prefix`、`--compiler-bin`、`--cmake`、`--ninja`、`--sevenzip`、`--rar` 指定。打包需要已有 7-Zip 与 WinRAR SFX 模块，不会自动安装工具。
 
 每次打包生成独立 `dist/release-*`，`dist/latest-release.json` 记录产物路径及哈希。`release-manifest.json` 保存源码文件哈希和构建信息，`SHA256.json` 校验运行文件。解出的 `install.ps1` 支持 `-InstallDirectory`、`-NoShortcuts`、`-Quiet`，用于隔离目录验证。当前为本地自解压安装器，没有卸载注册项或代码签名，不等同现场长期验收。
+
+本版加入异步历史分页和独立文件日志线程、按设备保留的双轴曲线、三类并行报警。正常应用启动不包含测试入口。用户AppData数据库、日志与原生QSettings配置保持原位置，包中不含个人数据或凭据。学习网页位于D:\我的八股，独立修订，不混入运行包。

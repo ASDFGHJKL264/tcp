@@ -1,0 +1,38 @@
+{
+  "date": "2026-10-14",
+  "version": "2026.10.14",
+  "environment": {
+    "os": "Windows 11",
+    "qt": "6.10.3",
+    "compiler": "MinGW GCC 13.1.0",
+    "configuration": "Debug"
+  },
+  "command": "scripts/verify.ps1 -LifecycleCycles 100",
+  "targets": [
+    "NetworkIntegrationTests",
+    "ReliabilityTests",
+    "DatabaseIntegrationTests",
+    "WindowLifecycleTests",
+    "HistoryQueryTests",
+    "PresentationTests",
+    "MonitorProtocolTests"
+  ],
+  "result": "all seven targets passed in final complete run",
+  "lifecycle": {
+    "cycles": 100,
+    "maximumCloseMs": 28,
+    "qtTestDurationMs": 18634
+  },
+  "previousFailure": {
+    "target": "WindowLifecycleTests",
+    "kind": "timeout",
+    "reportedSeconds": 573.69,
+    "cause": "not established; later independent and complete reruns passed"
+  },
+  "limitations": [
+    "local simulator and temporary databases only",
+    "no 24-hour aging or real hardware measurements",
+    "not an end-to-end latency benchmark",
+    "normal close timing is not a hard deadline"
+  ]
+}

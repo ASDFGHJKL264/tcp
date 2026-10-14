@@ -2,6 +2,7 @@
 
 #include <QDir>
 #include <QFileInfo>
+#include <QList>
 #include <QSqlDatabase>
 #include <QSqlError>
 #include <QSqlQuery>
@@ -84,29 +85,37 @@ void DatabaseWorker::storeTelemetry(const MonitorProtocol::Telemetry &t)
         emit databaseError(query.lastError().text());
         return;
     }
-    QString alarmType;
-    QString message;
-    if (t.temperature < 0.0 || t.temperature > 70.0) {
-        alarmType = QStringLiteral("温度越限");
-        message = QStringLiteral("设备%1温度%2℃越限").arg(t.deviceId).arg(t.temperature, 0, 'f', 1);
-    } else if (t.pressure < 0.7 || t.pressure > 1.5) {
-        alarmType = QStringLiteral("压力越限");
-        message = QStringLiteral("设备%1压力%2MPa越限").arg(t.deviceId).arg(t.pressure, 0, 'f', 2);
-    } else if (t.faultCode != 0) {
-        alarmType = QStringLiteral("设备故障");
-        message = QStringLiteral("设备%1故障码：%2").arg(t.deviceId).arg(t.faultCode);
-    }
-    const QString alarmKey = QStringLiteral("%1:%2").arg(t.deviceId).arg(alarmType);
+    struct Alarm {
+        QString type;
+        QString message;
+        QString key;
+    };
+    QList<Alarm> alarms;
     // Rate limiting uses local monotonic time, never a device's adjustable clock.
     const qint64 alarmTime = m_clock.elapsed();
-    const bool raiseAlarm = !alarmType.isEmpty() && (!m_lastAlarmMs.contains(alarmKey)
-        || alarmTime - m_lastAlarmMs.value(alarmKey) >= 60000);
-    if (raiseAlarm) {
+    const auto addAlarm = [&](const QString &type, const QString &message) {
+        const QString key = QStringLiteral("%1:%2").arg(t.deviceId).arg(type);
+        if (!m_lastAlarmMs.contains(key) || alarmTime - m_lastAlarmMs.value(key) >= 60000)
+            alarms.append({type, message, key});
+    };
+    if (t.temperature < 0.0 || t.temperature > 70.0) {
+        addAlarm(QStringLiteral("温度越限"),
+                 QStringLiteral("设备%1温度%2℃越限").arg(t.deviceId).arg(t.temperature, 0, 'f', 1));
+    }
+    if (t.pressure < 0.7 || t.pressure > 1.5) {
+        addAlarm(QStringLiteral("压力越限"),
+                 QStringLiteral("设备%1压力%2MPa越限").arg(t.deviceId).arg(t.pressure, 0, 'f', 2));
+    }
+    if (t.faultCode != 0) {
+        addAlarm(QStringLiteral("设备故障"),
+                 QStringLiteral("设备%1故障码：%2").arg(t.deviceId).arg(t.faultCode));
+    }
+    for (const Alarm &alarm : alarms) {
         query.prepare("INSERT INTO alarms(alarm_time,device_id,alarm_type,message) VALUES(?,?,?,?)");
         query.addBindValue(t.timestamp.toString(Qt::ISODateWithMs));
         query.addBindValue(t.deviceId);
-        query.addBindValue(alarmType);
-        query.addBindValue(message);
+        query.addBindValue(alarm.type);
+        query.addBindValue(alarm.message);
         if (!query.exec()) {
             emit databaseError(query.lastError().text());
             return;
@@ -117,10 +126,11 @@ void DatabaseWorker::storeTelemetry(const MonitorProtocol::Telemetry &t)
         return;
     }
     saved = true;
-    if (raiseAlarm) {
-        m_lastAlarmMs.insert(alarmKey, alarmTime);
-        emit alarmRaised(message);
-    }
+    // Commit all cooldowns before notifications, including direct/reentrant slots.
+    for (const Alarm &alarm : alarms)
+        m_lastAlarmMs.insert(alarm.key, alarmTime);
+    for (const Alarm &alarm : alarms)
+        emit alarmRaised(alarm.message);
 }
 
 void DatabaseWorker::shutdown()

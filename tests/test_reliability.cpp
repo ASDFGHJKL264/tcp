@@ -57,6 +57,65 @@ class ReliabilityTest : public QObject {
     Q_OBJECT
 private slots:
     void initTestCase() { qRegisterMetaType<Telemetry>(); }
+    void simulatorClientsHaveIndependentStreamsAndReplies() {
+        SimulatorServer server; QVERIFY(server.start(0));
+        StreamParser firstParser, secondParser;
+        QList<Packet> firstPackets, secondPackets;
+        QTcpSocket first, second;
+        connect(&first, &QTcpSocket::readyRead, &first, [&] {
+            firstPackets.append(firstParser.append(first.readAll()));
+        });
+        connect(&second, &QTcpSocket::readyRead, &second, [&] {
+            secondPackets.append(secondParser.append(second.readAll()));
+        });
+        QSignalSpy clientCounts(&server, &SimulatorServer::clientCountChanged);
+        first.connectToHost(QHostAddress::LocalHost, server.serverPort());
+        second.connectToHost(QHostAddress::LocalHost, server.serverPort());
+        QTRY_COMPARE(first.state(), QAbstractSocket::ConnectedState);
+        QTRY_COMPARE(second.state(), QAbstractSocket::ConnectedState);
+        QTRY_VERIFY(!clientCounts.isEmpty() && clientCounts.last()[0].toInt() == 2);
+        const auto commandAcks = [](const QList<Packet> &packets) {
+            QList<Packet> acks;
+            for (const auto &packet : packets)
+                if (packet.type == MessageType::CommandAck) acks.append(packet);
+            return acks;
+        };
+        // Both connections may use the same command sequence. One partial stream
+        // must not consume bytes or receive the acknowledgement of the other.
+        const quint32 sequence = 77;
+        const auto firstCommand = encodePacket({MessageType::Command, sequence, 1,
+                                                encodeCommand(DeviceCommand::Stop)});
+        const int split = 8;
+        QCOMPARE(first.write(firstCommand.left(split)), qint64(split));
+        QTest::qWait(100);
+        const auto secondCommand = encodePacket({MessageType::Command, sequence, 1,
+                                                 encodeCommand(DeviceCommand::Start)});
+        QCOMPARE(second.write(secondCommand), qint64(secondCommand.size()));
+        QTRY_COMPARE(commandAcks(secondPackets).size(), 1);
+        QCOMPARE(commandAcks(firstPackets).size(), 0);
+        QCOMPARE(first.write(firstCommand.mid(split)), qint64(firstCommand.size() - split));
+        QTRY_COMPARE(commandAcks(firstPackets).size(), 1);
+        QCOMPARE(commandAcks(secondPackets).size(), 1);
+        for (const auto &ack : {commandAcks(firstPackets).first(), commandAcks(secondPackets).first()}) {
+            QCOMPARE(ack.sequence, sequence);
+            QCOMPARE(ack.deviceId, quint16(1));
+            QCOMPARE(ack.payload, QByteArray(1, 1));
+        }
+        const auto sawStoppedDeviceOne = [](const QList<Packet> &packets) {
+            for (const auto &packet : packets) {
+                if (packet.type != MessageType::Telemetry || packet.deviceId != 1) continue;
+                Telemetry telemetry;
+                if (decodeTelemetry(packet.payload, &telemetry)
+                    && telemetry.state == DeviceState::Stopped) return true;
+            }
+            return false;
+        };
+        // Device state is intentionally shared: the completed Stop from the
+        // first client must be observed by both monitoring connections.
+        QTRY_VERIFY(sawStoppedDeviceOne(firstPackets));
+        QTRY_VERIFY(sawStoppedDeviceOne(secondPackets));
+        first.abort(); second.abort(); server.stop();
+    }
     void boundedTelemetryAndResume() {
         Peer peer; QVERIFY(peer.listen(QHostAddress::LocalHost, 0));
         ClientThread client;
@@ -120,6 +179,7 @@ private slots:
         Peer peer; QVERIFY(peer.listen(QHostAddress::LocalHost, 0));
         ClientThread client;
         QSignalSpy finished(client.worker, &TcpClientWorker::commandFinished);
+        QSignalSpy ack(client.worker, &TcpClientWorker::commandAcknowledged);
         client.connectTo(peer.serverPort()); QTRY_VERIFY(peer.socket);
         client.command(); QTRY_COMPARE(peer.commands.size(), 1);
         const auto p = peer.commands.first();
@@ -128,6 +188,30 @@ private slots:
         QVERIFY(!finished.first()[2].toBool());
         QVERIFY(finished.first()[3].toString().contains(accepted ? "状态确认超时" : "ACK超时"));
         QCOMPARE(peer.commands.size(), 1); // No automatic control retry.
+        const int previousAcks = ack.size();
+        Telemetry t; t.deviceId = 1; t.timestamp = QDateTime::currentDateTime();
+        t.state = DeviceState::Stopped;
+        peer.send({MessageType::CommandAck, p.sequence, 1, QByteArray(1, 1)});
+        peer.send({MessageType::Telemetry, 30, 1, encodeTelemetry(t)});
+        QTest::qWait(150);
+        QCOMPARE(finished.size(), 1); QCOMPARE(ack.size(), previousAcks);
+        QCOMPARE(peer.commands.size(), 1); // Late traffic cannot replay a command.
+
+        client.command(); // Only an explicit user request creates another command.
+        QTRY_COMPARE(peer.commands.size(), 2);
+        const auto next = peer.commands.last();
+        QVERIFY(next.sequence != p.sequence);
+        peer.send({MessageType::CommandAck, p.sequence, 1, QByteArray(1, 1)});
+        peer.send({MessageType::Telemetry, 31, 1, encodeTelemetry(t)});
+        QTest::qWait(150);
+        QCOMPARE(finished.size(), 1); QCOMPARE(ack.size(), previousAcks);
+        peer.send({MessageType::CommandAck, next.sequence, 1, QByteArray(1, 1)});
+        peer.send({MessageType::Telemetry, 32, 1, encodeTelemetry(t)});
+        QTRY_COMPARE(finished.size(), 2);
+        QVERIFY(finished.last()[2].toBool());
+        QCOMPARE(finished.last()[1].toUInt(), next.sequence);
+        QCOMPARE(ack.size(), previousAcks + 1);
+        QCOMPARE(peer.commands.size(), 2);
     }
     void rejection() {
         Peer peer; QVERIFY(peer.listen(QHostAddress::LocalHost, 0));

@@ -1,4 +1,5 @@
 #include "mainwindow.h"
+#include "asyncfilelogger.h"
 #include "databaseworker.h"
 #include "historydialog.h"
 #include "realtimeplot.h"
@@ -8,8 +9,6 @@
 #include <QComboBox>
 #include <QDateTime>
 #include <QDir>
-#include <QFile>
-#include <QFileInfo>
 #include <QFormLayout>
 #include <QGridLayout>
 #include <QGroupBox>
@@ -25,7 +24,6 @@
 #include <QStatusBar>
 #include <QTableWidget>
 #include <QTextEdit>
-#include <QTextStream>
 #include <QTextDocument>
 #include <QThread>
 #include <QTimer>
@@ -40,6 +38,14 @@ MainWindow::MainWindow(QWidget *parent, const QString &dataDirectory)
     m_clock.start();
     qRegisterMetaType<DeviceCommand>();
     buildUi();
+    m_fileLogger = new AsyncFileLogger(logPath(), this);
+    connect(m_fileLogger, &AsyncFileLogger::writeFailed, this, [this](const QString &reason) {
+        m_log->append(QStringLiteral("[日志写盘失败] %1").arg(reason.toHtmlEscaped()));
+    });
+    connect(m_fileLogger, &AsyncFileLogger::overflow, this, [this](quint64 normal, quint64 warnings) {
+        m_log->append(QStringLiteral("[日志队列过载] 普通日志丢弃%1，警告日志丢弃%2；磁盘日志可能不完整")
+                      .arg(normal).arg(warnings));
+    });
     loadSettings();
     setupWorkers();
     m_offlineTimer = new QTimer(this);
@@ -73,6 +79,7 @@ MainWindow::~MainWindow()
     QCoreApplication::sendPostedEvents(this, QEvent::MetaCall);
     appendLog(QStringLiteral("存储统计：成功 %1，失败 %2，过载丢弃 %3，最慢写入 %4ms")
         .arg(m_savedSamples).arg(m_failedSamples).arg(m_droppedSamples).arg(m_maxWriteMs));
+    m_fileLogger->shutdown();
 }
 
 void MainWindow::connectConfiguredServer()
@@ -164,7 +171,9 @@ void MainWindow::buildUi()
     connect(stop, &QPushButton::clicked, this, [this] { sendSelectedCommand(DeviceCommand::Stop); });
     connect(reset, &QPushButton::clicked, this, [this] { sendSelectedCommand(DeviceCommand::Reset); });
     connect(history, &QPushButton::clicked, this, &MainWindow::openHistory);
-    connect(m_plotDevice, &QComboBox::currentIndexChanged, m_plot, &RealTimePlot::clear);
+    connect(m_plotDevice, &QComboBox::currentIndexChanged, this, [this] {
+        m_plot->selectDevice(m_plotDevice->currentData().toInt());
+    });
     menuBar()->addAction(QStringLiteral("历史数据"), this, &MainWindow::openHistory);
 }
 
@@ -240,8 +249,7 @@ void MainWindow::handleTelemetry(const Telemetry &t)
         m_devices->item(row, i + 1)->setText(values.at(i));
     const QColor color = t.state == DeviceState::Fault ? QColor(198, 40, 40) : QColor(46, 125, 50);
     m_devices->item(row, 2)->setForeground(color);
-    if (m_plotDevice->currentData().toInt() == t.deviceId)
-        m_plot->appendPoint(t.temperature, t.pressure);
+    m_plot->appendPoint(t.deviceId, t.temperature, t.pressure);
     emit storeTelemetry(t);
 }
 
@@ -250,6 +258,7 @@ void MainWindow::updateConnectionState(bool connected, const QString &descriptio
     m_connected = connected;
     m_connectButton->setText(m_sessionActive ? QStringLiteral("取消/断开连接") : QStringLiteral("建立连接"));
     if (!connected) {
+        m_plot->clear();
         m_lastSeen.clear();
         checkOfflineDevices();
     }
@@ -289,22 +298,7 @@ void MainWindow::appendLog(const QString &message, bool warning)
     const QString line = QStringLiteral("[%1] %2").arg(time, message);
     m_log->append(warning ? QStringLiteral("<font color='#c62828'>%1</font>").arg(line.toHtmlEscaped())
                           : line.toHtmlEscaped());
-    const QString path = logPath();
-    if (QFileInfo(path).size() >= 5 * 1024 * 1024) {
-        // 1 active file plus 9 archives; stop writing on rotation failure.
-        bool rotated = !QFile::exists(path + ".9") || QFile::remove(path + ".9");
-        for (int i = 8; rotated && i >= 1; --i) {
-            const QString from = path + "." + QString::number(i);
-            if (QFile::exists(from)) rotated = QFile::rename(from, path + "." + QString::number(i + 1));
-        }
-        if (rotated) rotated = QFile::rename(path, path + ".1");
-        if (!rotated) return;
-    }
-    QFile file(path);
-    if (file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
-        QTextStream out(&file);
-        out << line << '\n';
-    }
+    m_fileLogger->append(line, warning);
 }
 
 QString MainWindow::databasePath() const
@@ -318,7 +312,6 @@ QString MainWindow::logPath() const
 {
     const QString directory = m_dataDirectory.isEmpty()
         ? QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) : m_dataDirectory;
-    QDir().mkpath(QDir(directory).filePath("logs"));
     return QDir(directory).filePath("logs/monitor.log");
 }
 
