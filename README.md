@@ -23,6 +23,7 @@ TcpMonitorSystem/
 - `CommonProtocol`：CRC、协议编解码、半包、粘包和损坏包恢复测试。
 - `TcpDeviceMonitorClient`：SQLite事务/并行报警、后台历史查询、日志/曲线与窗口生命周期测试。
 - 根目录：真实服务端与客户端工作对象之间的TCP集成测试。
+- `DeviceSimulator`：监听端口占用后的重试，以及带客户端连接关闭模拟器的回归测试。
 
 ## 整改验证
 
@@ -39,3 +40,9 @@ Windows / Qt MinGW环境可运行 `./scripts/verify.ps1 -LifecycleCycles 100`，
 - 模拟器仍表示共享四台设备，多个客户端各自解析与接收ACK；未知命令结果不自动重发。补了双客户端半包/相同序号及迟到ACK回归。
 
 七个测试目标已通过；详见 [VALIDATION.md](VALIDATION.md)。不等同现场实机或24小时验收。
+
+## 2026-11-03：全项目缺陷检查
+
+修复ACK回调重入和模拟器带连接退出的两处崩溃、监听失败后的按钮/端口状态、历史时间比较与分页、数据库对象销毁后的连接残留，以及不能保存为历史格式的异常时间戳。未增加业务功能。
+
+当前复现入口仍为 `./scripts/verify.ps1 -LifecycleCycles 100`，现包含8个CTest目标。检查范围、失败复现和最终结果见 [AUDIT_20261103.md](AUDIT_20261103.md)。

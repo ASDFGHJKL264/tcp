@@ -20,3 +20,15 @@ target_link_libraries(DeviceSimulator PRIVATE
     MonitorProtocol Qt6::Widgets Qt6::Network)
 
 install(TARGETS DeviceSimulator RUNTIME DESTINATION .)
+
+include(CTest)
+if(BUILD_TESTING)
+    find_package(Qt6 REQUIRED COMPONENTS Test)
+    qt_add_executable(SimulatorUiTests tests/test_simulatorui.cpp
+        simulator/simulatorwindow.h simulator/simulatorwindow.cpp
+        simulator/simulatorserver.h simulator/simulatorserver.cpp)
+    target_include_directories(SimulatorUiTests PRIVATE simulator)
+    target_link_libraries(SimulatorUiTests PRIVATE MonitorProtocol Qt6::Widgets Qt6::Network Qt6::Test)
+    add_test(NAME SimulatorUiTests COMMAND SimulatorUiTests -platform offscreen -o simulator-ui-results.txt,txt)
+    set_tests_properties(SimulatorUiTests PROPERTIES TIMEOUT 30)
+endif()

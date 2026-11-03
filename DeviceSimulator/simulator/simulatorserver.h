@@ -15,6 +15,7 @@ class SimulatorServer final : public QObject
     Q_OBJECT
 public:
     explicit SimulatorServer(QObject *parent = nullptr);
+    ~SimulatorServer() override;
     bool start(quint16 port);
     void stop();
     bool isListening() const;

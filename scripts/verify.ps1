@@ -25,7 +25,7 @@ try {
         @{ Source = '.'; Build = 'integration-quality'; Test = $true },
         @{ Source = 'TcpDeviceMonitorClient'; Build = 'client-quality'; Test = $true },
         @{ Source = 'CommonProtocol'; Build = 'protocol-quality'; Test = $true },
-        @{ Source = 'DeviceSimulator'; Build = 'simulator-quality'; Test = $false }
+        @{ Source = 'DeviceSimulator'; Build = 'simulator-quality'; Test = $true }
     )
     foreach ($stage in $stages) {
         $source = Join-Path $projectRoot $stage.Source

@@ -57,6 +57,62 @@ class ReliabilityTest : public QObject {
     Q_OBJECT
 private slots:
     void initTestCase() { qRegisterMetaType<Telemetry>(); }
+    void ackCallbackCanDisconnect_data() {
+        QTest::addColumn<bool>("accepted");
+        QTest::newRow("accepted") << true;
+        QTest::newRow("rejected") << false;
+    }
+    void ackCallbackCanDisconnect() {
+        QFETCH(bool, accepted);
+        Peer peer; QVERIFY(peer.listen(QHostAddress::LocalHost, 0));
+        TcpClientWorker client;
+        QSignalSpy finished(&client, &TcpClientWorker::commandFinished);
+        QSignalSpy samples(&client, &TcpClientWorker::telemetryReceived);
+        connect(&client, &TcpClientWorker::commandAcknowledged, &client,
+                [&client] { client.disconnectFromServer(); });
+        client.connectToServer("127.0.0.1", peer.serverPort());
+        QTRY_VERIFY(peer.socket);
+        client.sendCommand(1, DeviceCommand::Stop);
+        QTRY_COMPARE(peer.commands.size(), 1);
+        Telemetry t; t.timestamp = QDateTime::currentDateTime();
+        t.state = DeviceState::Stopped;
+        const auto sequence = peer.commands.first().sequence;
+        // Both frames are already parsed when a direct ACK subscriber cancels the session.
+        const auto frames = encodePacket({MessageType::CommandAck, sequence, 1,
+                                          QByteArray(1, accepted ? 1 : 0)})
+            + encodePacket({MessageType::Telemetry, 77, 1, encodeTelemetry(t)});
+        QCOMPARE(peer.socket->write(frames), qint64(frames.size()));
+        QTRY_COMPARE(finished.size(), 1);
+        QVERIFY(!finished.first()[2].toBool());
+        QTest::qWait(50);
+        QCOMPARE(samples.size(), 0);
+        client.shutdown();
+    }
+    void timeoutCallbackCanIssueAnotherCommand() {
+        Peer peer; QVERIFY(peer.listen(QHostAddress::LocalHost, 0));
+        TcpClientWorker client;
+        QSignalSpy finished(&client, &TcpClientWorker::commandFinished);
+        int completed = 0;
+        connect(&client, &TcpClientWorker::commandFinished, &client, [&client, &completed] {
+            if (++completed == 1) client.sendCommand(3, DeviceCommand::Stop);
+        });
+        client.connectToServer("127.0.0.1", peer.serverPort());
+        QTRY_VERIFY(peer.socket);
+        client.sendCommand(1, DeviceCommand::Stop);
+        client.sendCommand(2, DeviceCommand::Stop);
+        QTRY_COMPARE(peer.commands.size(), 2);
+        QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 2, 4500);
+        QTRY_COMPARE(peer.commands.size(), 3);
+        const auto command = peer.commands.last();
+        QCOMPARE(command.deviceId, quint16(3));
+        peer.send({MessageType::CommandAck, command.sequence, 3, QByteArray(1, 1)});
+        Telemetry t; t.timestamp = QDateTime::currentDateTime();
+        t.state = DeviceState::Stopped;
+        peer.send({MessageType::Telemetry, 88, 3, encodeTelemetry(t)});
+        QTRY_COMPARE(finished.size(), 3);
+        QVERIFY(finished.last()[2].toBool());
+        client.shutdown();
+    }
     void simulatorClientsHaveIndependentStreamsAndReplies() {
         SimulatorServer server; QVERIFY(server.start(0));
         StreamParser firstParser, secondParser;

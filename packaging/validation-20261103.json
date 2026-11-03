@@ -1,0 +1,73 @@
+{
+  "date": "2026-11-03",
+  "baseCommit": "40471c307478108ea31b3af2733659ac61f00d81",
+  "scope": "source defect audit; no new business features",
+  "result": "passed",
+  "command": "scripts/verify.ps1 -LifecycleCycles 100",
+  "testGroups": [
+    {
+      "group": "integration",
+      "targets": 2,
+      "failed": 0,
+      "caseSeconds": 36.541805000000004
+    },
+    {
+      "group": "client",
+      "targets": 4,
+      "failed": 0,
+      "caseSeconds": 34.309927099999996
+    },
+    {
+      "group": "protocol",
+      "targets": 1,
+      "failed": 0,
+      "caseSeconds": 0.154521
+    },
+    {
+      "group": "simulator",
+      "targets": 1,
+      "failed": 0,
+      "caseSeconds": 0.889126
+    }
+  ],
+  "targetsPassed": 8,
+  "qtTestEntries": {
+    "integration/network-results.txt": 3,
+    "integration/reliability-results.txt": 18,
+    "client/database-results.txt": 8,
+    "client/history-results.txt": 11,
+    "client/lifecycle-results.txt": 4,
+    "client/presentation-results.txt": 8,
+    "protocol/protocol-results.txt": 12,
+    "simulator/simulator-ui-results.txt": 4
+  },
+  "entryCountsIncludeInitCleanupAndDataRows": true,
+  "lifecycleCycles": 100,
+  "maximumObservedCloseMs": 33,
+  "beforeFix": {
+    "ackCallbackExitCode": "0xC0000005",
+    "simulatorClosingExitCode": "0xC0000005",
+    "timezoneQueryExpectedRows": 200,
+    "timezoneQueryActualRows": 0,
+    "occupiedPortUiFailure": true,
+    "databaseConnectionLeak": true,
+    "unrepresentableTimestampAccepted": true
+  },
+  "historyUpgrade": {
+    "telemetryRowsChecked": 1101,
+    "alarmRowsChecked": 2,
+    "originalTextPreserved": true,
+    "injectedFailureRollbackAndRetryPassed": true,
+    "indexedQueryPlansVerified": true,
+    "legacyReadonlyAndPartialMetadataCompatibilityPassed": true
+  },
+  "mixedProtocolStreamFrames": 1000,
+  "formalDatabaseUsed": false,
+  "installationUpdated": false,
+  "limitations": [
+    "Windows 11 / Qt 6.10.3 / MinGW 13.1 only",
+    "No real hardware, 24-hour aging, full-disk or OS-hang validation",
+    "No ASan/TSan; no absolute defect-free or timing guarantee",
+    "Offsetless legacy time uses local timezone at upgrade; original timezone is not recoverable"
+  ]
+}

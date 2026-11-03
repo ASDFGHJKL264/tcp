@@ -6,12 +6,80 @@
 #include <QSqlDatabase>
 #include <QSqlError>
 #include <QSqlQuery>
+#include <QSqlRecord>
 #include <QThread>
 #include <QElapsedTimer>
 #include <QScopeGuard>
 #include <QUuid>
 
+namespace {
+bool upgradeHistoryTimes(QSqlDatabase &db, QString *error)
+{
+    if (!db.transaction()) {
+        *error = db.lastError().text();
+        return false;
+    }
+    auto rollback = qScopeGuard([&] { db.rollback(); });
+    for (const auto &table : {QStringLiteral("telemetry"), QStringLiteral("alarms")}) {
+        const QString timeColumn = table == "telemetry" ? "sample_time" : "alarm_time";
+        const QString epochColumn = table == "telemetry" ? "sample_epoch_ms" : "alarm_epoch_ms";
+        if (db.record(table).indexOf(epochColumn) < 0) {
+            QSqlQuery alter(db);
+            if (!alter.exec("ALTER TABLE " + table + " ADD COLUMN " + epochColumn + " INTEGER")) {
+                *error = alter.lastError().text();
+                return false;
+            }
+        }
+        bool first = true;
+        qint64 lastId = 0;
+        while (true) {
+            QList<QPair<qint64, QString>> batch;
+            {
+                QSqlQuery select(db);
+                const QString sql = "SELECT id," + timeColumn + " FROM " + table
+                    + " WHERE " + epochColumn + " IS NULL" + (first ? "" : " AND id>?")
+                    + " ORDER BY id LIMIT 500";
+                if (!select.prepare(sql)) { *error = select.lastError().text(); return false; }
+                if (!first) select.addBindValue(lastId);
+                if (!select.exec()) { *error = select.lastError().text(); return false; }
+                while (select.next()) batch.append({select.value(0).toLongLong(), select.value(1).toString()});
+                if (select.lastError().isValid()) { *error = select.lastError().text(); return false; }
+            }
+            if (batch.isEmpty()) break;
+            first = false;
+            lastId = batch.last().first;
+            QSqlQuery update(db);
+            if (!update.prepare("UPDATE " + table + " SET " + epochColumn + "=? WHERE id=?")) {
+                *error = update.lastError().text(); return false;
+            }
+            for (const auto &row : batch) {
+                // Old Qt::LocalTime ISO strings have no offset. Preserve the original
+                // text; interpret those as local time, just as QDateTime did before.
+                const auto time = QDateTime::fromString(row.second, Qt::ISODateWithMs);
+                if (!time.isValid() || time.toUTC().toString(Qt::ISODateWithMs).isEmpty()) continue;
+                update.bindValue(0, time.toMSecsSinceEpoch());
+                update.bindValue(1, row.first);
+                if (!update.exec()) { *error = update.lastError().text(); return false; }
+            }
+        }
+        for (bool device : {false, true}) {
+            QSqlQuery index(db);
+            const QString name = "idx_" + table + (device ? "_device_epoch" : "_epoch");
+            if (!index.exec("CREATE INDEX IF NOT EXISTS " + name + " ON " + table + "("
+                            + (device ? "device_id," : "") + epochColumn + ",id)")) {
+                *error = index.lastError().text(); return false;
+            }
+        }
+    }
+    if (!db.commit()) { *error = db.lastError().text(); return false; }
+    rollback.dismiss();
+    return true;
+}
+}
+
 DatabaseWorker::DatabaseWorker(QObject *parent) : QObject(parent) { m_clock.start(); }
+
+DatabaseWorker::~DatabaseWorker() { shutdown(); }
 
 void DatabaseWorker::initialize(const QString &databasePath)
 {
@@ -50,6 +118,12 @@ void DatabaseWorker::initialize(const QString &databasePath)
         emit databaseError(query.lastError().text());
         return;
     }
+    query.finish();
+    QString upgradeError;
+    if (!upgradeHistoryTimes(db, &upgradeError)) {
+        emit databaseError(upgradeError);
+        return;
+    }
     m_ready = true;
     emit ready(m_connectionName);
 }
@@ -72,8 +146,8 @@ void DatabaseWorker::storeTelemetry(const MonitorProtocol::Telemetry &t)
     }
     const auto rollback = qScopeGuard([&] { if (!saved) db.rollback(); });
     QSqlQuery query(db);
-    query.prepare("INSERT INTO telemetry(sample_time,device_id,temperature,pressure,rpm,state,fault_code) "
-                  "VALUES(?,?,?,?,?,?,?)");
+    query.prepare("INSERT INTO telemetry(sample_time,device_id,temperature,pressure,rpm,state,fault_code,sample_epoch_ms) "
+                  "VALUES(?,?,?,?,?,?,?,?)");
     query.addBindValue(t.timestamp.toString(Qt::ISODateWithMs));
     query.addBindValue(t.deviceId);
     query.addBindValue(t.temperature);
@@ -81,6 +155,7 @@ void DatabaseWorker::storeTelemetry(const MonitorProtocol::Telemetry &t)
     query.addBindValue(t.rpm);
     query.addBindValue(static_cast<int>(t.state));
     query.addBindValue(t.faultCode);
+    query.addBindValue(t.timestamp.toMSecsSinceEpoch());
     if (!query.exec()) {
         emit databaseError(query.lastError().text());
         return;
@@ -111,11 +186,12 @@ void DatabaseWorker::storeTelemetry(const MonitorProtocol::Telemetry &t)
                  QStringLiteral("设备%1故障码：%2").arg(t.deviceId).arg(t.faultCode));
     }
     for (const Alarm &alarm : alarms) {
-        query.prepare("INSERT INTO alarms(alarm_time,device_id,alarm_type,message) VALUES(?,?,?,?)");
+        query.prepare("INSERT INTO alarms(alarm_time,device_id,alarm_type,message,alarm_epoch_ms) VALUES(?,?,?,?,?)");
         query.addBindValue(t.timestamp.toString(Qt::ISODateWithMs));
         query.addBindValue(t.deviceId);
         query.addBindValue(alarm.type);
         query.addBindValue(alarm.message);
+        query.addBindValue(t.timestamp.toMSecsSinceEpoch());
         if (!query.exec()) {
             emit databaseError(query.lastError().text());
             return;

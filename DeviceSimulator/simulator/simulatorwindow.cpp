@@ -53,6 +53,7 @@ SimulatorWindow::SimulatorWindow(QWidget *parent)
     });
     connect(injectFault, &QPushButton::clicked, this,
             [this] { m_server->injectFault(2, 1001); });
-    m_server->start(static_cast<quint16>(m_port->value()));
-    m_port->setEnabled(false);
+    const bool listening = m_server->start(static_cast<quint16>(m_port->value()));
+    m_toggle->setText(listening ? QStringLiteral("停止服务") : QStringLiteral("启动服务"));
+    m_port->setEnabled(!listening);
 }

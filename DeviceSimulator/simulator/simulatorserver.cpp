@@ -15,6 +15,13 @@ SimulatorServer::SimulatorServer(QObject *parent) : QObject(parent)
     connect(&m_telemetryTimer, &QTimer::timeout, this, &SimulatorServer::sendTelemetry);
 }
 
+SimulatorServer::~SimulatorServer()
+{
+    // Socket destruction can emit disconnected. Close them while the containers
+    // used by removeClient are still alive, before member destruction begins.
+    stop();
+}
+
 bool SimulatorServer::start(quint16 port)
 {
     if (m_server.isListening())

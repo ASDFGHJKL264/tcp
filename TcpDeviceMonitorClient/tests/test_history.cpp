@@ -108,6 +108,64 @@ class HistoryQueryTest final : public QObject
 {
     Q_OBJECT
 private slots:
+    void mixedTimezoneInstantsRemainQueryableAndPaged_data()
+    {
+        QTest::addColumn<int>("schema");
+        QTest::newRow("legacy-readonly") << 0;
+        QTest::newRow("indexed-current") << 1;
+        QTest::newRow("indexed-with-older-writer") << 2;
+    }
+    void mixedTimezoneInstantsRemainQueryableAndPaged()
+    {
+        QFETCH(int, schema);
+        QTemporaryDir directory; QVERIFY(directory.isValid());
+        const auto path = directory.filePath("zones.db");
+        const auto instant = QDateTime::fromString("2026-01-01T00:00:00.123Z", Qt::ISODateWithMs);
+        QVERIFY(seedDatabase(path, instant));
+        const auto name = QUuid::createUuid().toString();
+        {
+            auto db = QSqlDatabase::addDatabase("QSQLITE", name);
+            db.setDatabaseName(path); QVERIFY(db.open());
+            QSqlQuery q(db);
+            QVERIFY(q.exec("UPDATE telemetry SET sample_time=CASE WHEN id%2=0 THEN '2026-01-01T08:00:00.123+08:00' ELSE '2025-12-31T19:00:00.123-05:00' END"));
+            QVERIFY(q.exec("UPDATE alarms SET alarm_time=CASE WHEN id%2=0 THEN '2026-01-01T08:00:00.123+08:00' ELSE '2025-12-31T19:00:00.123-05:00' END"));
+            if (schema > 0) {
+                QVERIFY(q.exec("ALTER TABLE telemetry ADD COLUMN sample_epoch_ms INTEGER"));
+                QVERIFY(q.exec("ALTER TABLE alarms ADD COLUMN alarm_epoch_ms INTEGER"));
+                for (const auto &table : {QString("telemetry"), QString("alarms")}) {
+                    const QString epoch = table == "telemetry" ? "sample_epoch_ms" : "alarm_epoch_ms";
+                    QVERIFY(q.prepare("UPDATE " + table + " SET " + epoch + "=?" + (schema == 2 ? " WHERE id%3<>0" : "")));
+                    q.addBindValue(instant.toMSecsSinceEpoch());
+                    QVERIFY(q.exec());
+                }
+            }
+        }
+        QSqlDatabase::removeDatabase(name);
+        WorkerThread runner(path);
+        QSignalSpy completed(runner.worker, &HistoryQueryWorker::completed);
+        quint64 requestId = 0;
+        for (int kind = 0; kind < 2; ++kind) {
+            HistoryQueryRequest request{++requestId, kind, instant, instant, 2, {}};
+            QVERIFY(runner.submit(request));
+            QTRY_COMPARE(completed.size(), 1);
+            auto page = qvariant_cast<HistoryQueryResult>(completed.takeFirst()[0]);
+            QVERIFY2(page.error.isEmpty(), qPrintable(page.error));
+            QCOMPARE(page.rows.size(), 200);
+            QVERIFY(page.hasMore);
+            QCOMPARE(page.rows.first().at(kind == 0 ? 4 : 3), QString("220"));
+            QCOMPARE(page.rows.last().at(kind == 0 ? 4 : 3), QString("21"));
+            request.requestId = ++requestId;
+            request.cursor = page.nextCursor;
+            QVERIFY(runner.submit(request));
+            QTRY_COMPARE(completed.size(), 1);
+            page = qvariant_cast<HistoryQueryResult>(completed.takeFirst()[0]);
+            QVERIFY(page.error.isEmpty());
+            QCOMPARE(page.rows.size(), 20);
+            QVERIFY(!page.hasMore);
+            QCOMPARE(page.rows.first().at(kind == 0 ? 4 : 3), QString("20"));
+            QCOMPARE(page.rows.last().at(kind == 0 ? 4 : 3), QString("1"));
+        }
+    }
     void workerFiltersFormatsAndPages()
     {
         QTemporaryDir directory;

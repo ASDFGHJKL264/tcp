@@ -61,7 +61,9 @@ bool MonitorProtocol::decodeTelemetry(const QByteArray &payload, Telemetry *tele
     telemetry->state = static_cast<DeviceState>(state);
     if (in.status() != QDataStream::Ok || state > static_cast<quint8>(DeviceState::Fault)
         || !std::isfinite(telemetry->temperature) || !std::isfinite(telemetry->pressure)
-        || !telemetry->timestamp.isValid()) {
+        || !telemetry->timestamp.isValid()
+        || telemetry->timestamp.toString(Qt::ISODateWithMs).isEmpty()
+        || telemetry->timestamp.toUTC().toString(Qt::ISODateWithMs).isEmpty()) {
         if (error)
             *error = QStringLiteral("遥测数据内容无效");
         return false;

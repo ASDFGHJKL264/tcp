@@ -91,6 +91,7 @@ private:
     qint64 m_lastHeartbeatAck = 0;
     int m_reconnectAttempt = 0;
     bool m_manualDisconnect = true;
+    quint64 m_sessionGeneration = 0;
     QTimer *m_deadlineTimer = nullptr;
     QElapsedTimer m_clock;
     qint64 m_connectStarted = 0;

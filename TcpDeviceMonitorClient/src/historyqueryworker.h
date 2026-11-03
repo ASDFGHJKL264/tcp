@@ -14,6 +14,8 @@ struct HistoryCursor
 {
     QString time;
     qint64 id = 0;
+    qint64 epochMs = 0;
+    bool hasEpoch = false;
 };
 
 struct HistoryQueryRequest

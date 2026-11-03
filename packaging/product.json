@@ -1,6 +1,6 @@
 {
   "name": "TCP工业设备监控系统",
-  "version": "2026.10.15",
+  "version": "2026.11.03.1",
   "installDirectory": "D:\\TCP工业设备监控系统",
   "applications": [
     {
@@ -20,6 +20,7 @@
     "README.md",
     "RELIABILITY.md",
     "VALIDATION.md",
-    "RELEASE.md"
+    "RELEASE.md",
+    "AUDIT_20261103.md"
   ]
 }

@@ -13,6 +13,7 @@ class DatabaseWorker final : public QObject
     Q_OBJECT
 public:
     explicit DatabaseWorker(QObject *parent = nullptr);
+    ~DatabaseWorker() override;
 
 public slots:
     void initialize(const QString &databasePath);

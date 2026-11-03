@@ -36,6 +36,7 @@ Qt Creator 可分别打开：
 2. TcpDeviceMonitorClient/CMakeLists.txt：监控端、DatabaseIntegrationTests、WindowLifecycleTests、HistoryQueryTests、PresentationTests。
 3. CommonProtocol/CMakeLists.txt：MonitorProtocolTests。
 4. DeviceSimulator/CMakeLists.txt：模拟器。
+   `BUILD_TESTING=ON`时另有SimulatorUiTests，验证端口占用重试与带连接退出；正常运行仍选择DeviceSimulator。
 
 测试属于独立可执行程序；正常使用选择 TcpDeviceMonitor 或 DeviceSimulator，不选择测试目标。
 在各自构建目录运行 ctest --output-on-failure。需 Qt Core/Widgets/Network/Sql/Test、SQLite 插件及相应编译器运行库。
@@ -65,3 +66,13 @@ Qt Creator 可分别打开：
 通信在线取决于网络线程最近3秒是否收到合法遥测，不取决于数据库是否能接收样本；存储过载单独显示。活性、存储统计和网络日志共用250ms合并的NetworkUiUpdate通道，最多1批在途，GUI处理后回确认；入口日志128条含在途，每批32条，警告保留16条，单条4096字符，满额丢弃统计可见。GUI恢复时可能先处理旧快照，下一合并批次纠正，这是GUI冻结后的显示延迟，不是设备实际断线。
 
 64条遥测额度在GUI消费数据库完成通知后归还，数据库错误通知也受未完成采样预算约束。文件日志256条及32条警告预留仍独立保留。关闭不等待入口确认，而是停止生产后有限排空。新回归与最新运行结果见VALIDATION.md。
+
+## 2026-11-03：生命周期和历史时间修复
+
+ACK先更新/移除待确认状态，再发出允许直接回调的通知；超时处理先收集并移除全部到期命令，再发通知，避免回调再次操作命令表时使迭代器失效。连接代次变化后，已经拆出的旧会话剩余帧不再交付。
+
+模拟器析构时先停止服务、关闭客户端，使disconnected回调在客户端容器仍存活时完成。监听失败时显示“启动服务”并解锁端口，以便重试；数据库对象析构也会在所属线程释放连接。
+
+历史筛选和游标统一使用绝对毫秒时间与ID，不再直接比较可能带不同时区的字符串。初始化在事务中给旧记录补充sample_epoch_ms/alarm_epoch_ms及全设备/单设备索引，原始时间文字和记录内容不改写；失败回滚。新样本与报警在原事务中同时保存该时间值。旧版无偏移时间按升级机器的本地时区解释，无法恢复未保存的原始时区信息。未升级只读库和旧写入者留下的空时间元数据有兼容读取分支，该分支可能需要扫描/排序；正常已升级路径经EXPLAIN验证使用索引。
+
+完整检查记录见AUDIT_20261103.md，本次未增加界面入口、协议消息、报警种类或控制功能。

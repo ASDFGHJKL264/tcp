@@ -1,6 +1,7 @@
 #include "protocol.h"
 
 #include <QtTest>
+#include <QRandomGenerator>
 
 using namespace MonitorProtocol;
 
@@ -9,6 +10,45 @@ class ProtocolTest final : public QObject
     Q_OBJECT
 
 private slots:
+    void timestampsMustBeRepresentableInHistory()
+    {
+        Telemetry t;
+        t.timestamp = QDateTime::fromMSecsSinceEpoch(253402300800000LL); // Year 10000.
+        QVERIFY(t.timestamp.isValid());
+        QVERIFY(t.timestamp.toString(Qt::ISODateWithMs).isEmpty());
+        Telemetry decoded;
+        QString error;
+        QVERIFY(!decodeTelemetry(encodeTelemetry(t), &decoded, &error));
+        QVERIFY(!error.isEmpty());
+    }
+    void seededMixedStreamResynchronizes()
+    {
+        QRandomGenerator random(0x7123);
+        QByteArray stream;
+        constexpr quint32 count = 1000;
+        for (quint32 i = 1; i <= count; ++i) {
+            stream += QByteArray::fromHex("e011aa");
+            const auto frame = encodePacket({MessageType::HeartbeatAck, i, 0, {}});
+            if (i % 7 == 0) {
+                auto bad = frame;
+                bad[bad.size() - 1] ^= 0x40;
+                stream += bad;
+            }
+            stream += frame;
+        }
+        StreamParser parser;
+        quint32 expected = 1;
+        for (qsizetype at = 0; at < stream.size();) {
+            const auto bytes = stream.mid(at, random.bounded(1, 102));
+            at += bytes.size();
+            for (const auto &p : parser.append(bytes)) {
+                QCOMPARE(p.sequence, expected++);
+                QCOMPARE(p.type, MessageType::HeartbeatAck);
+            }
+            QVERIFY(parser.bufferedBytes() <= HeaderSize + 2);
+        }
+        QCOMPARE(expected, count + 1);
+    }
     void crcKnownVector();
     void packetRoundTrip();
     void fragmentedPacket();

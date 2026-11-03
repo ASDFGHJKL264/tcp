@@ -46,6 +46,7 @@ void TcpClientWorker::ensureSocket()
         queueLog(QStringLiteral("TCP连接建立：%1:%2").arg(m_host).arg(m_port));
     });
     connect(m_socket, &QTcpSocket::disconnected, this, [this] {
+        ++m_sessionGeneration;
         m_heartbeatTimer->stop();
         m_parser.clear();
         m_heartbeatSequence = 0;
@@ -97,6 +98,7 @@ void TcpClientWorker::attemptConnection()
 
 void TcpClientWorker::disconnectFromServer()
 {
+    ++m_sessionGeneration;
     m_manualDisconnect = true;
     if (m_reconnectTimer) m_reconnectTimer->stop();
     if (m_heartbeatTimer) m_heartbeatTimer->stop();
@@ -136,12 +138,21 @@ void TcpClientWorker::sendCommand(quint16 deviceId, DeviceCommand command)
 
 void TcpClientWorker::readAvailableData()
 {
+    if (!m_socket || m_manualDisconnect || m_socket->state() != QAbstractSocket::ConnectedState)
+        return;
+    const auto generation = m_sessionGeneration;
     const auto packets = m_parser.append(m_socket->read(64 * 1024));
     const QString parserError = m_parser.takeLastError();
     if (!parserError.isEmpty())
         queueLog(QStringLiteral("协议解析告警：%1").arg(parserError), true);
-    for (const Packet &packet : packets)
+    for (const Packet &packet : packets) {
+        // A direct signal subscriber may close/reconnect while processing an ACK.
+        // Already parsed frames still belong to the former connection.
+        if (generation != m_sessionGeneration || m_manualDisconnect
+            || m_socket->state() != QAbstractSocket::ConnectedState)
+            return;
         handlePacket(packet);
+    }
     if (m_socket->bytesAvailable() > 0)
         QTimer::singleShot(0, this, &TcpClientWorker::readAvailableData);
 }
@@ -162,15 +173,18 @@ void TcpClientWorker::handlePacket(const Packet &packet)
             || m_clock.elapsed() >= it->deadline
             || packet.payload.size() != 1 || (packet.payload[0] != 0 && packet.payload[0] != 1)) return;
         const bool accepted = packet.payload[0] == 1;
-        emit commandAcknowledged(packet.deviceId, accepted);
         if (!accepted) {
             m_pending.erase(it);
+            emit commandAcknowledged(packet.deviceId, false);
             emit commandFinished(packet.deviceId, packet.sequence, false, QStringLiteral("设备拒绝命令"));
         } else {
             it->accepted = true;
             it->deadline = m_clock.elapsed() + 5000;
             queueLog(QStringLiteral("设备%1接受命令#%2，等待遥测状态确认")
                 .arg(packet.deviceId).arg(packet.sequence));
+            // Complete every access through the iterator before notifying subscribers:
+            // they can synchronously disconnect and clear m_pending.
+            emit commandAcknowledged(packet.deviceId, true);
         }
         return;
     }
@@ -192,9 +206,12 @@ void TcpClientWorker::handlePacket(const Packet &packet)
     // telemetry explicitly rather than queueing unbounded cross-thread events.
     // Credits survive reconnects because old storage completions can arrive late.
     if (m_inFlightTelemetry < MaximumInFlightTelemetry) {
+        const auto generation = m_sessionGeneration;
         ++m_inFlightTelemetry;
         m_peakTelemetry = qMax(m_peakTelemetry, m_inFlightTelemetry);
         emit telemetryReceived(telemetry);
+        if (generation != m_sessionGeneration || m_manualDisconnect)
+            return;
     } else {
         ++m_droppedTelemetry;
     }
@@ -261,12 +278,19 @@ void TcpClientWorker::checkDeadlines()
         m_socket->abort();
         scheduleReconnect();
     }
+    QList<QPair<quint32, Pending>> expired;
     for (auto it = m_pending.begin(); it != m_pending.end();) {
         if (now < it->deadline) { ++it; continue; }
         const auto sequence = it.key();
         const auto pending = it.value();
         it = m_pending.erase(it);
-        emit commandFinished(pending.deviceId, sequence, false, pending.accepted
+        expired.append({sequence, pending});
+    }
+    // Notification subscribers may issue another command and rehash m_pending.
+    // Finish walking the map before exposing any timeout callbacks.
+    for (const auto &entry : expired) {
+        const auto &pending = entry.second;
+        emit commandFinished(pending.deviceId, entry.first, false, pending.accepted
             ? QStringLiteral("ACK已接受，但状态确认超时；不会自动重发")
             : QStringLiteral("ACK超时，执行结果未知；不会自动重发"));
     }
